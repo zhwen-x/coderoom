@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CodeRoom 学生端</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- 第一步：连接服务端 -->
+<section id="screen-connect" class="screen">
+  <div class="card">
+    <h1>CodeRoom</h1>
+    <p class="muted">正在查找局域网内的判题服务端…</p>
+    <div id="server-list" class="list"></div>
+    <div class="divider"><span>或手动输入</span></div>
+    <div class="row">
+      <input id="manual-addr" placeholder="例如 192.168.1.10:8080" autocomplete="off">
+      <button id="btn-connect" class="primary">连接</button>
+    </div>
+    <div class="row">
+      <button id="btn-rescan">重新搜索</button>
+    </div>
+    <p id="connect-err" class="err"></p>
+  </div>
+</section>
+
+<!-- 第二步：选择考试并登录 -->
+<section id="screen-login" class="screen" hidden>
+  <div class="card">
+    <h1>登录</h1>
+    <p class="muted" id="login-server"></p>
+    <label>选择考试 / 练习
+      <select id="exam-select"></select>
+    </label>
+    <div class="grid2">
+      <label>学号<input id="in-student-no" autocomplete="off"></label>
+      <label>姓名<input id="in-name" autocomplete="off"></label>
+    </div>
+    <label id="passcode-wrap" hidden>考试口令
+      <input id="in-passcode" type="password" autocomplete="off">
+    </label>
+    <button id="btn-login" class="primary">进入</button>
+    <p id="login-err" class="err"></p>
+    <p class="muted small">请确认学号与姓名无误，考试过程中的所有提交都与此身份绑定。</p>
+    <button id="btn-back" class="link">返回重新选择服务端</button>
+  </div>
+</section>
+
+<!-- 主界面 -->
+<section id="screen-main" class="screen main" hidden>
+  <header>
+    <div class="who">
+      <strong id="hdr-name"></strong>
+      <span class="muted" id="hdr-no"></span>
+    </div>
+    <div class="exam-name muted" id="hdr-exam"></div>
+    <div class="spacer"></div>
+    <div id="hdr-countdown" class="countdown"></div>
+    <div id="hdr-sync" class="sync" title="与服务端的同步状态"></div>
+    <button id="btn-handin" class="primary">交卷</button>
+    <button id="btn-menu">更多</button>
+  </header>
+
+  <div id="locked-banner" class="banner" hidden></div>
+
+  <div class="panes">
+    <aside id="pane-list" class="pane-list"></aside>
+    <div id="pane-problem" class="pane-problem"></div>
+    <div class="pane-editor">
+      <div class="editor-bar">
+        <span id="ed-title" class="muted"></span>
+        <div class="spacer"></div>
+        <select id="ed-lang" title="语言"></select>
+        <span id="ed-saved" class="muted small"></span>
+        <button id="btn-save">保存</button>
+        <button id="btn-submit" class="primary">提交判题</button>
+      </div>
+      <div id="editor-host" class="editor-host"></div>
+      <div id="result-box" class="result-box"></div>
+    </div>
+  </div>
+</section>
+
+<div id="toast" class="toast" hidden></div>
+
+<div id="sheet" class="sheet" hidden>
+  <div class="sheet-box">
+    <div class="sheet-head"><h2 id="sheet-title"></h2><button id="sheet-close" class="icon">×</button></div>
+    <div id="sheet-body" class="sheet-body"></div>
+    <div id="sheet-foot" class="sheet-foot"></div>
+  </div>
+</div>
+
+<script src="editor.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

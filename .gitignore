@@ -1,0 +1,14 @@
+# Build output
+dist/
+
+# Runtime data (database, test data, student code, config with admin token)
+coderoom-data/
+coderoom-client-data/
+
+# Bundled portable toolchain (shipped in the release archive, not in git)
+toolchain/
+
+# Go
+*.exe
+*.test
+*.out

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CodeRoom 教师端</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="gate" class="gate">
+  <div class="gate-card">
+    <h1>CodeRoom 教师端</h1>
+    <p class="muted">请输入服务端启动时显示的管理口令。</p>
+    <input id="gate-token" type="password" placeholder="管理口令" autocomplete="off">
+    <button id="gate-btn" class="primary">进入</button>
+    <p id="gate-err" class="err"></p>
+  </div>
+</div>
+
+<div id="app" hidden>
+  <header>
+    <div class="brand">CodeRoom <span class="muted">教师端</span></div>
+    <nav id="tabs">
+      <button data-view="exams" class="active">考试/练习</button>
+      <button data-view="problems">题库</button>
+      <button data-view="monitor">监考</button>
+      <button data-view="submissions">提交</button>
+      <button data-view="scores">成绩</button>
+      <button data-view="system">系统</button>
+    </nav>
+    <div id="ctx" class="ctx muted"></div>
+  </header>
+  <main id="view"></main>
+  <div id="toast" class="toast" hidden></div>
+</div>
+
+<div id="modal" class="modal" hidden>
+  <div class="modal-box">
+    <div class="modal-head">
+      <h2 id="modal-title"></h2>
+      <button id="modal-close" class="icon" aria-label="关闭">×</button>
+    </div>
+    <div id="modal-body" class="modal-body"></div>
+    <div id="modal-foot" class="modal-foot"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
