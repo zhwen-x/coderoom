@@ -252,3 +252,40 @@ func TestJudgeUnknownLanguageRejected(t *testing.T) {
 		t.Fatalf("verdict = %s, want SE for an unknown language", res.Verdict)
 	}
 }
+
+func TestJudgeOutputLimitExceeded(t *testing.T) {
+	j := newTestJudger(t)
+	requireLang(t, j, protocol.LangCPP)
+
+	// 25 MiB in 64 KiB writes, past the judge's 16 MiB output cap. Written in
+	// large blocks rather than a printf loop so the test stays fast.
+	//
+	// This exercises the real cappedFile in the runner; the fake-runner test
+	// only checks that an OutputExceeded flag becomes an OLE verdict.
+	const flood = `
+#include <cstdio>
+#include <cstring>
+int main() {
+    static char buf[65536];
+    memset(buf, 'x', sizeof(buf));
+    buf[sizeof(buf) - 1] = '\n';
+    for (int i = 0; i < 400; i++) fwrite(buf, 1, sizeof(buf), stdout);
+    return 0;
+}`
+	res, err := j.Judge(context.Background(), Request{
+		Language: protocol.LangCPP,
+		Code:     flood,
+		Problem:  Problem{TimeLimitMS: 5000, MemoryLimitMB: 256, ScoreMode: "sum"},
+		Cases:    mustCases(t, [][2]string{{"", "anything\n"}}, 10),
+	})
+	if err != nil {
+		t.Fatalf("judge error: %v", err)
+	}
+	if res.Verdict != protocol.VerdictOLE {
+		t.Fatalf("verdict = %s, want OLE\n  编译日志: %s\n  测试点: %+v",
+			res.Verdict, res.CompileLog, res.Cases)
+	}
+	if res.Score != 0 {
+		t.Errorf("score = %d, want 0 on OLE", res.Score)
+	}
+}

@@ -158,16 +158,28 @@ Windows 二进制目前只做过交叉编译验证。以下代码路径从未在
 
 ## Windows 真机验证清单
 
-沙箱是唯一无法在开发机上验证的核心逻辑，建议按下表逐项确认（都在练习模式下提交即可）：
+沙箱是交叉编译验证不到的部分，现在已由 Windows 专有的自动化测试覆盖。
+在 Windows 上运行构建脚本即可执行：
 
-| 提交的代码 | 期望判定 | 验证的是 |
-|---|---|---|
-| `int main(){ for(;;); }` | TLE | CPU 时间限制 |
-| `int main(){ while(1) new char[1<<20]; }` | MLE | 内存上限，且**不是**系统崩溃 |
-| `int main(){ *(int*)0 = 1; }` | RE | 崩溃对话框被抑制，没有弹窗卡住判题 |
-| `int main(){ while(1) printf("x"); }` | OLE | 输出上限，磁盘没被写满 |
-| `#include <windows.h>`<br>`int main(){ while(1) system("start cmd"); }` | RE 或 TLE | 单进程限制挡住 fork 炸弹；任务管理器里不应出现残留进程 |
-| 正常的 A+B | AC，耗时/内存为合理非零值 | Job Object 计量生效 |
+```
+powershell -ExecutionPolicy Bypass -File scripts\build.ps1
+```
 
-另外确认：判题过程中**不应有控制台窗口闪烁**（`CREATE_NO_WINDOW`），以及服务端进程结束后
-没有任何残留的学生进程（`KILL_ON_JOB_CLOSE`）。
+`internal/judge/sandbox_windows_test.go`（`//go:build windows`）验证：
+
+| 测试 | 验证的是 |
+|---|---|
+| `TestSandboxEnforcesMemoryLimit` | 内存上限。程序以 4 MiB 为单位增量提交至多 800 MiB，应判 MLE 而非含糊的运行时错误 |
+| `TestSandboxBlocksChildProcesses` | 单进程限制。程序重启自身 5 次并按退出码统计真正运行起来的子进程，应为 0 |
+| `TestSandboxSuppressesCrashDialog` | 崩溃对话框抑制。空指针解引用应判 RE 并快速返回；若判成 TLE 说明被模态框阻塞到墙钟超时 |
+| `TestSandboxAccountingIsSane` | Job Object 的时间与内存计量。这守的是手工声明的结构体布局——写错不会编译失败，只会在成绩单里静默给出垃圾数字 |
+
+平台无关的判定逻辑（TLE / OLE / RE / CE / 两种评分方式）由常规测试覆盖，
+macOS 与 Windows 上都会跑。
+
+仍需人工确认的两项：
+
+1. **学生端窗口**：运行 `dist\client\coderoom-client.exe`，确认 WebView2 窗口能打开、
+   编辑器高亮正常、粘贴可用。`internal/client/window_windows.go` 无法自动化测试。
+2. **无残留与无闪窗**：判题过程中不应有控制台窗口闪烁（`CREATE_NO_WINDOW`）；
+   服务端退出后任务管理器里不应有残留的学生进程（`KILL_ON_JOB_CLOSE`）。
