@@ -30,11 +30,34 @@ go run ./cmd/coderoom-client -server 127.0.0.1:8080
 
 ### 构建 Windows 发行包
 
+在 macOS / Linux 上交叉编译：
+
 ```bash
 ./scripts/build.sh
 ```
 
-产出 `dist/server/` 与 `dist/client/`，各含 64 位与 32 位 exe 和一份中文说明。构建前会自动做前端语法检查、`go vet` 和单元测试。
+在 Windows 上原生编译（双击 `scripts\build.cmd`，或在终端里）：
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\build.ps1
+```
+
+两者产物一致：`dist/server/` 与 `dist/client/`，各含 64 位与 32 位 exe 和一份中文说明；
+构建前都会做前端语法检查、`go vet` 和单元测试，并在 `toolchain/` 非空时把便携工具链折进服务端包。
+
+**在 Windows 上构建多一层价值**：`go test` 会真实执行判题沙箱的代码路径（`NewRunner()`
+在 Windows 上返回的就是 Job Object 实现），这是交叉编译验证不到的。
+
+PowerShell 脚本的常用开关：
+
+| 开关 | 作用 |
+|---|---|
+| `-SkipTests` | 跳过 vet/test，仅反复调试构建本身时用 |
+| `-Arch amd64` | 只构建 64 位，省一半时间 |
+| `-Out <目录>` | 改变产物目录 |
+
+`build.cmd` 只是一层包装：绕过 PowerShell 对未签名脚本的默认执行策略，并在结束时
+`pause`，这样双击运行出错时窗口不会一闪而过。
 
 ---
 
@@ -85,7 +108,10 @@ internal/store/         SQLite 持久化 + 测试数据/代码的磁盘布局
 internal/judge/         编译、运行、比对、评分（Runner 接口是 M1 沙箱的接入点）
 internal/server/        HTTP API、判题 worker 池、UDP 发现、内嵌教师端 Web
 internal/client/        上游 API、本地状态与离线队列、本地 HTTP、内嵌学生端 Web
-scripts/build.sh        交叉编译 Windows 发行包
+scripts/build.sh        在 macOS/Linux 上交叉编译 Windows 发行包
+scripts/build.ps1       在 Windows 上原生编译（测试会真实跑到 Job Object 沙箱）
+scripts/build.cmd       build.ps1 的双击入口
+packaging/              发行包附带的中文说明，两个构建脚本共用以免文案漂移
 ```
 
 两处逻辑在客户端和服务端各实现了一份（代码哈希、源文件扩展名），由
