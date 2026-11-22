@@ -5,8 +5,10 @@ dist/
 coderoom-data/
 coderoom-client-data/
 
-# Bundled portable toolchain (shipped in the release archive, not in git)
-toolchain/
+# Bundled portable toolchain binaries ship in the release archive, not in git.
+# The layout doc is kept.
+toolchain/*
+!toolchain/README.md
 
 # Go
 *.exe

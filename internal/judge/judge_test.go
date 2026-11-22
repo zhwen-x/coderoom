@@ -16,7 +16,7 @@ import (
 func newTestJudger(t *testing.T) *Judger {
 	t.Helper()
 	tc := DetectToolchain(t.TempDir(), Toolchain{})
-	return New(tc, DefaultRunner{}, t.TempDir())
+	return New(tc, NewRunner(), t.TempDir())
 }
 
 func mustCases(t *testing.T, pairs [][2]string, score int) []TestCase {

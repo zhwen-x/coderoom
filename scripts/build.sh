@@ -44,6 +44,18 @@ build windows amd64 coderoom-client "$OUT/client" coderoom-client.exe
 build windows 386 coderoom-server "$OUT/server" coderoom-server-x86.exe
 build windows 386 coderoom-client "$OUT/client" coderoom-client-x86.exe
 
+# A populated toolchain/ is folded into the server package so the teacher's
+# machine needs nothing installed. Absent, the server falls back to PATH and
+# says so in its startup banner.
+if [ -d toolchain ] && [ -n "$(ls -A toolchain 2>/dev/null | grep -v '^README.md$')" ]; then
+  echo "  打包便携工具链 toolchain/ -> $OUT/server/toolchain/"
+  mkdir -p "$OUT/server/toolchain"
+  (cd toolchain && tar cf - --exclude README.md .) | (cd "$OUT/server/toolchain" && tar xf -)
+else
+  echo "  未发现便携工具链（toolchain/ 为空）；教师机需自行安装 gcc/python，"
+  echo "  或参见 toolchain/README.md 放入便携版后重新构建"
+fi
+
 cat > "$OUT/server/读我.txt" <<'TXT'
 CodeRoom 判题服务端（教师端）
 =============================
@@ -51,11 +63,13 @@ CodeRoom 判题服务端（教师端）
 2. 浏览器会自动打开教师端；管理口令请勿转发给学生。
 3. 窗口中列出的 "IP:端口" 就是告知学生端的服务器地址。
 4. 数据全部保存在同目录的 coderoom-data 文件夹，整个文件夹可直接拷贝备份。
-5. 判题需要 g++/gcc/python。若本机未安装，请把便携工具链放到：
+5. 启动横幅会写明「可判语言」。若缺少 C++/C/Python，说明本机没有对应的
+   编译器，可在教师端「系统 - 判题环境」中手动指定路径，或把便携工具链放到：
       toolchain\mingw64\bin\g++.exe
       toolchain\python\python.exe
-   或在教师端「系统 - 判题环境」中手动指定路径。
-   建议与机房 IDE 的编译器版本保持一致。
+6. 判题使用的语言标准在教师端「系统」中设置（默认 C++14 / C11）。
+7. 判题在 Windows Job Object 沙箱中运行：限制内存、CPU 时间和进程数，
+   并抑制崩溃对话框。详见教师端「系统 - 判题沙箱」。
 TXT
 
 cat > "$OUT/client/读我.txt" <<'TXT'

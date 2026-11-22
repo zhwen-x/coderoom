@@ -712,6 +712,12 @@ async function viewSystem() {
     gcc: el('input', { value: sys.override.gcc || '', placeholder: '留空则自动探测' }),
     python: el('input', { value: sys.override.python || '', placeholder: '留空则自动探测' }),
   };
+  const std = {
+    cpp: el('select', {}, ...['c++98', 'c++11', 'c++14', 'c++17', 'c++20'].map((v) =>
+      el('option', { value: v, selected: v === sys.options.cpp_std }, v))),
+    c: el('select', {}, ...['c89', 'c99', 'c11', 'c17'].map((v) =>
+      el('option', { value: v, selected: v === sys.options.c_std }, v))),
+  };
 
   const saveToolchain = async () => {
     try {
@@ -721,6 +727,8 @@ async function viewSystem() {
           gxx: ov.gxx.value.trim(),
           gcc: ov.gcc.value.trim(),
           python: ov.python.value.trim(),
+          cpp_std: std.cpp.value,
+          c_std: std.c.value,
         }),
       });
       toast('已保存');
@@ -740,15 +748,26 @@ async function viewSystem() {
 
   const judgePanel = el('div', { class: 'panel' },
     el('h2', {}, '判题环境'),
+    ...(sys.warnings || []).map((w) => el('p', { class: 'err' }, '⚠ ' + w)),
     el('div', { class: 'scroll' }, toolTable),
-    el('p', { class: 'muted' },
-      '建议让这里的编译器版本与机房 IDE 保持一致，否则会出现「学生本地能编译、服务端编译错误」。'),
     el('div', { class: 'grid2' },
       el('label', {}, 'g++ 路径', ov.gxx),
       el('label', {}, 'gcc 路径', ov.gcc),
-      el('label', {}, 'python 路径', ov.python)),
+      el('label', {}, 'python 路径', ov.python),
+      el('label', {}, 'C++ 标准', std.cpp),
+      el('label', {}, 'C 标准', std.c)),
+    el('p', { class: 'muted' },
+      '机房使用 Visual Studio / Dev-C++ / PyCharm / IDLE。标准选得比机房 IDE 更旧是安全的；' +
+      '选得更新则可能出现「学生本地能编译、服务端编译错误」。'),
     el('div', { class: 'row' },
-      el('button', { class: 'primary', onclick: saveToolchain }, '保存编译器路径')));
+      el('button', { class: 'primary', onclick: saveToolchain }, '保存判题设置')));
+
+  const sandboxPanel = el('div', { class: 'panel' },
+    el('h2', {}, '判题沙箱'),
+    el('p', {}, sys.sandbox),
+    el('p', { class: 'muted' },
+      '沙箱防的是意外（死循环、内存耗尽、输出爆炸、误开子进程），不防刻意编写的恶意代码。' +
+      '考试场景下每份提交都与学号绑定、可追责。'));
 
   const roster = el('textarea', { rows: '8', placeholder: '每行一个：学号,姓名,班级' });
 
@@ -796,7 +815,7 @@ async function viewSystem() {
       el('button', { class: 'primary', onclick: importRoster }, '导入名单'),
       el('button', { onclick: showRoster }, '查看名单')));
 
-  setMain(connectPanel, judgePanel, rosterPanel);
+  setMain(connectPanel, judgePanel, sandboxPanel, rosterPanel);
 }
 
 bootGate();

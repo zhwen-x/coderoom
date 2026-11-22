@@ -39,6 +39,7 @@ type Config struct {
 	Workers       int             `json:"workers"`
 	AdminToken    string          `json:"admin_token"`
 	Toolchain     judge.Toolchain `json:"toolchain_override"`
+	Language      judge.Options   `json:"language_options"`
 }
 
 func DefaultConfig() Config {
@@ -46,6 +47,7 @@ func DefaultConfig() Config {
 		Addr:          ":8080",
 		DiscoveryPort: 8099,
 		Workers:       2,
+		Language:      judge.DefaultOptions(),
 	}
 }
 
@@ -82,15 +84,30 @@ func New(st *store.Store, cfg Config, baseDir string, logger *log.Logger) (*Serv
 		cfg:     cfg,
 		cfgPath: cfgPath,
 		st:      st,
-		judger:  judge.New(tc, judge.DefaultRunner{}, filepath.Join(st.DataDir(), "work")),
+		judger:  judge.New(tc, judge.NewRunner(), filepath.Join(st.DataDir(), "work")),
 		baseDir: baseDir,
 		logger:  logger,
 	}
+	// Normalising here means a hand-edited config.json with a bad standard
+	// degrades to the default instead of breaking every compile.
+	if warnings := s.judger.SetOptions(cfg.Language); len(warnings) > 0 {
+		for _, w := range warnings {
+			logger.Printf("判题配置: %s", w)
+		}
+	}
+	s.cfg.Language = s.judger.Options()
+
 	if err := s.saveConfig(); err != nil {
 		return nil, err
 	}
 	s.routes()
 	return s, nil
+}
+
+// JudgeableLanguages reports which languages this server can actually judge,
+// for the startup banner and the teacher's system panel.
+func (s *Server) JudgeableLanguages() map[string]bool {
+	return s.judger.Toolchain().Available()
 }
 
 func randomToken() (string, error) {

@@ -14,45 +14,65 @@ type RunRequest struct {
 	Argv       []string // argv[0] must be an absolute path
 	StdinPath  string   // "" means no stdin
 	StdoutPath string   // "" means discard
-	// CPULimit is the problem's time limit. The default runner cannot enforce
-	// CPU time directly, so it kills on WallLimit and then compares measured
-	// CPU time against this.
+
+	// CPULimit is the problem's time limit. Platforms that can enforce CPU
+	// time do so; the wall-clock kill below is the backstop everywhere.
 	CPULimit      time.Duration
 	WallLimit     time.Duration
 	MemoryLimitMB int
 	OutputLimit   int64 // bytes; 0 means unlimited
+
+	// Compile is set for the compiler invocation rather than the student's
+	// program. Compilers legitimately use lots of memory and spawn child
+	// processes (cc1plus, as, ld), so the sandbox's memory and process-count
+	// limits must not apply to them.
+	Compile bool
 }
 
 // RunResult is what the judge needs to assign a verdict.
 type RunResult struct {
 	ExitCode       int
-	CPUMS          int // user + system CPU time
+	CPUMS          int // user + kernel CPU time
 	WallMS         int
-	MemoryKB       int  // peak RSS; 0 when the platform cannot report it
+	MemoryKB       int  // peak memory; 0 when the platform cannot report it
 	TimedOut       bool // killed at WallLimit
-	MemExceeded    bool // only set by a sandbox that enforces memory
+	MemExceeded    bool // peak memory went past the problem's limit
 	OutputExceeded bool
 	Stderr         string
 }
 
 // Runner executes a process under whatever limits the platform supports.
-//
-// DefaultRunner (M0) enforces only a wall-clock kill and an output cap. M1
-// adds a Windows Job Object implementation enforcing memory, CPU time and
-// process count; the judge above this interface does not change.
 type Runner interface {
 	Run(ctx context.Context, req RunRequest) (RunResult, error)
 }
 
-// DefaultRunner runs the process with no isolation beyond a timeout.
+// NewRunner returns the best runner for this platform.
 //
-// Known limits, stated plainly: a submission can allocate as much memory as
-// the machine has, spawn child processes, and touch the filesystem. That is
-// acceptable for M0 (link-up) and is what the M1 sandbox closes. It is NOT
-// suitable for judging untrusted code from outside the classroom.
-type DefaultRunner struct{}
+// On Windows that is a Job Object sandbox enforcing memory, CPU time and
+// process count. Elsewhere (the development machine) only the wall-clock kill
+// and the output cap apply — enough to develop and test the judging logic,
+// but not a sandbox. The production target is Windows.
+func NewRunner() Runner { return execRunner{} }
 
-func (DefaultRunner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+// execRunner holds the process plumbing shared by every platform: redirection,
+// output capping, timeout and exit handling. Everything platform-specific
+// lives behind the limiter interface, which keeps the untestable surface small.
+type execRunner struct{}
+
+// limiter is the platform's resource-enforcement hook around one execution.
+//
+// The call order is prepare -> (process created) -> started -> (process runs)
+// -> finish -> close. On Windows the process is created suspended so that
+// `started` can attach it to the job before a single instruction of the
+// student's code runs; there is no window in which it is unconstrained.
+type limiter interface {
+	prepare(cmd *exec.Cmd) error
+	started(cmd *exec.Cmd) error
+	finish(cmd *exec.Cmd, res *RunResult)
+	close()
+}
+
+func (execRunner) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if len(req.Argv) == 0 {
 		return RunResult{}, errors.New("empty argv")
 	}
@@ -66,8 +86,8 @@ func (DefaultRunner) Run(ctx context.Context, req RunRequest) (RunResult, error)
 
 	cmd := exec.CommandContext(runCtx, req.Argv[0], req.Argv[1:]...)
 	cmd.Dir = req.Dir
-	// Deny the child the parent's environment; a submission has no business
-	// reading the server's env, and an empty env also keeps runs reproducible.
+	// Deny the child the parent's environment: a submission has no business
+	// reading the server's env, and a fixed env also keeps runs reproducible.
 	cmd.Env = minimalEnv()
 
 	if req.StdinPath != "" {
@@ -93,8 +113,30 @@ func (DefaultRunner) Run(ctx context.Context, req RunRequest) (RunResult, error)
 	errCap := &cappedBuffer{limit: 16 << 10}
 	cmd.Stderr = errCap
 
+	// Bound two sources of unexpected delay in Wait: a process that ignores
+	// the context cancellation, and one that exits but leaves a grandchild
+	// holding the stderr pipe (gcc spawning cc1plus does exactly this).
+	cmd.WaitDelay = 3 * time.Second
+
+	lim := newLimiter(req)
+	defer lim.close()
+	if err := lim.prepare(cmd); err != nil {
+		return RunResult{}, err
+	}
+
 	start := time.Now()
-	err := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return RunResult{}, err
+	}
+	if err := lim.started(cmd); err != nil {
+		// The process exists but could not be constrained. Kill it rather
+		// than letting unconstrained student code run.
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return RunResult{}, err
+	}
+
+	err := cmd.Wait()
 	wallMS := int(time.Since(start).Milliseconds())
 
 	res := RunResult{
@@ -107,12 +149,15 @@ func (DefaultRunner) Run(ctx context.Context, req RunRequest) (RunResult, error)
 	if ps := cmd.ProcessState; ps != nil {
 		res.ExitCode = ps.ExitCode()
 		res.CPUMS = int((ps.UserTime() + ps.SystemTime()).Milliseconds())
-		res.MemoryKB = peakRSSKB(ps)
 	}
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		res.TimedOut = true
 		res.ExitCode = -1
 	}
+
+	// Platform accounting overrides the portable numbers where it is better.
+	lim.finish(cmd, &res)
+
 	// A failure to start (binary missing, not executable) is a judge-side
 	// problem, not a student verdict; surface it as an error.
 	var ee *exec.ExitError
@@ -124,8 +169,8 @@ func (DefaultRunner) Run(ctx context.Context, req RunRequest) (RunResult, error)
 
 func minimalEnv() []string {
 	env := []string{}
-	// Windows binaries need SystemRoot to load core DLLs; Python needs a
-	// writable temp dir for its bytecode cache.
+	// Windows binaries need SystemRoot to load core DLLs; compilers and Python
+	// need PATH and a writable temp dir.
 	for _, k := range []string{"SystemRoot", "windir", "TEMP", "TMP", "TMPDIR", "PATH"} {
 		if v := os.Getenv(k); v != "" {
 			env = append(env, k+"="+v)

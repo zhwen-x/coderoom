@@ -11,8 +11,9 @@ import (
 )
 
 const (
-	idlePoll  = 500 * time.Millisecond
-	errorPoll = 2 * time.Second
+	idlePoll     = 500 * time.Millisecond
+	errorPoll    = 2 * time.Second
+	retryBackoff = 2 * time.Second
 	// A single submission must not be able to wedge a worker forever.
 	taskTimeout = 5 * time.Minute
 )
@@ -53,11 +54,29 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// maxJudgeAttempts bounds automatic retries of a judge-side failure. A
+// transient cause (a momentarily locked file, a sandbox that failed to
+// initialise) clears on its own; a permanent one must not spin forever.
+const maxJudgeAttempts = 3
+
 func (s *Server) runTask(ctx context.Context, worker string, task *store.JudgeTask) {
 	taskCtx, cancel := context.WithTimeout(ctx, taskTimeout)
 	defer cancel()
 
-	fail := func(msg string) {
+	// fail ends the task. retryable marks failures that a later attempt could
+	// plausibly survive; missing rows cannot, so they give up immediately.
+	fail := func(msg string, retryable bool) {
+		if retryable && task.Attempts < maxJudgeAttempts {
+			s.logger.Printf("[%s] submission %d 判题失败(第 %d/%d 次)，稍后重试: %s",
+				worker, task.SubmissionID, task.Attempts, maxJudgeAttempts, msg)
+			if err := s.st.RetryTask(taskCtx, task.ID, msg); err != nil {
+				s.logger.Printf("[%s] 重新入队失败: %v", worker, err)
+			} else {
+				// Let the cause clear before another worker grabs it.
+				sleepCtx(ctx, retryBackoff)
+				return
+			}
+		}
 		// A judge-side failure still gets a stored result, so the teacher sees
 		// "SE: <reason>" in the gradebook rather than a silently missing row.
 		_ = s.st.SaveJudgeResult(taskCtx, &store.JudgeResult{
@@ -67,27 +86,27 @@ func (s *Server) runTask(ctx context.Context, worker string, task *store.JudgeTa
 			Cases:        []protocol.CaseResult{},
 		})
 		_ = s.st.FinishTask(taskCtx, task.ID, store.TaskError, msg)
-		s.logger.Printf("[%s] submission %d: %s", worker, task.SubmissionID, msg)
+		s.logger.Printf("[%s] submission %d 判题失败(已放弃): %s", worker, task.SubmissionID, msg)
 	}
 
 	sub, err := s.st.GetSubmission(taskCtx, task.SubmissionID)
 	if err != nil {
-		fail("找不到提交记录: " + err.Error())
+		fail("找不到提交记录: "+err.Error(), false)
 		return
 	}
 	problem, err := s.st.GetProblem(taskCtx, sub.ProblemID)
 	if err != nil {
-		fail("找不到题目: " + err.Error())
+		fail("找不到题目: "+err.Error(), false)
 		return
 	}
 	cases, err := s.st.ListTestcases(taskCtx, sub.ProblemID)
 	if err != nil {
-		fail("读取测试数据失败: " + err.Error())
+		fail("读取测试数据失败: "+err.Error(), true)
 		return
 	}
 	code, err := s.st.ReadSubmissionCode(sub)
 	if err != nil {
-		fail("读取提交代码失败: " + err.Error())
+		fail("读取提交代码失败: "+err.Error(), true)
 		return
 	}
 
@@ -112,7 +131,7 @@ func (s *Server) runTask(ctx context.Context, worker string, task *store.JudgeTa
 		Cases: jcases,
 	})
 	if err != nil {
-		fail("判题失败: " + err.Error())
+		fail("判题失败: "+err.Error(), true)
 		return
 	}
 
@@ -126,7 +145,7 @@ func (s *Server) runTask(ctx context.Context, worker string, task *store.JudgeTa
 		CompileLog:   res.CompileLog,
 		Cases:        res.Cases,
 	}); err != nil {
-		fail("保存判题结果失败: " + err.Error())
+		fail("保存判题结果失败: "+err.Error(), true)
 		return
 	}
 	if err := s.st.FinishTask(taskCtx, task.ID, store.TaskDone, ""); err != nil {

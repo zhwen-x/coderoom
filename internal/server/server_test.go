@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"coderoom/internal/judge"
 	"coderoom/internal/protocol"
 	"coderoom/internal/store"
 )
@@ -585,4 +586,133 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func TestJudgeRetriesThenGivesUp(t *testing.T) {
+	h := newHarness(t)
+	problemID, examID := h.seedPractice()
+	h.login(examID, "2023", "张三", "")
+
+	code := "int main(){}"
+	var sub protocol.SubmitResponse
+	status, raw := h.do(http.MethodPost, "/api/client/submit", protocol.SubmitRequest{
+		ProblemID: problemID, Language: "cpp", Code: code, Hash: store.HashCode(code),
+	}, false)
+	h.mustJSON(status, raw, &sub)
+
+	// Remove the archived source so every judging attempt fails in a way that
+	// a later attempt could plausibly survive (a locked or missing file).
+	stored, err := h.st.GetSubmission(context.Background(), sub.SubmissionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(stored.CodePath); err != nil {
+		t.Fatal(err)
+	}
+
+	h.startWorkers()
+
+	// It should retry, not fail on the first attempt. maxJudgeAttempts is 3
+	// with a 2s backoff between them.
+	deadline := time.Now().Add(30 * time.Second)
+	var result *store.JudgeResult
+	for time.Now().Before(deadline) {
+		result, err = h.st.GetJudgeResult(context.Background(), sub.SubmissionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result != nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if result == nil {
+		t.Fatal("task never settled")
+	}
+	if result.Verdict != protocol.VerdictSE {
+		t.Errorf("verdict = %s, want SE for a judge-side failure", result.Verdict)
+	}
+	// The student must be told it was a server problem, not their code.
+	if !strings.Contains(result.CompileLog, "读取提交代码失败") {
+		t.Errorf("failure reason lost, student cannot tell this was a server fault: %q",
+			result.CompileLog)
+	}
+}
+
+func TestExplicitRejudgeResetsAttemptBudget(t *testing.T) {
+	h := newHarness(t)
+	problemID, examID := h.seedPractice()
+	h.login(examID, "2023", "张三", "")
+	ctx := context.Background()
+
+	code := "int main(){}"
+	var sub protocol.SubmitResponse
+	status, raw := h.do(http.MethodPost, "/api/client/submit", protocol.SubmitRequest{
+		ProblemID: problemID, Language: "cpp", Code: code, Hash: store.HashCode(code),
+	}, false)
+	h.mustJSON(status, raw, &sub)
+
+	// Burn the budget the way repeated automatic retries would.
+	for i := 0; i < 5; i++ {
+		if _, err := h.st.ClaimTask(ctx, "w"); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.st.RetryTask(ctx, 1, "transient"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	task, err := h.st.ClaimTask(ctx, "w")
+	if err != nil || task == nil {
+		t.Fatalf("claim: %v %v", task, err)
+	}
+	if task.Attempts <= maxJudgeAttempts {
+		t.Fatalf("attempts = %d, expected the budget to be spent", task.Attempts)
+	}
+
+	// A teacher asking for a rejudge means "try again properly", so the
+	// budget has to reset or the request would be ignored.
+	status, raw = h.do(http.MethodPost,
+		"/api/teacher/submissions/"+itoa(sub.SubmissionID)+"/judge", nil, true)
+	h.mustJSON(status, raw, nil)
+
+	task, err = h.st.ClaimTask(ctx, "w")
+	if err != nil || task == nil {
+		t.Fatalf("claim after rejudge: %v %v", task, err)
+	}
+	if task.Attempts != 1 {
+		t.Errorf("attempts after an explicit rejudge = %d, want 1", task.Attempts)
+	}
+}
+
+func TestSystemPanelReportsSandboxAndStandards(t *testing.T) {
+	h := newHarness(t)
+
+	var sys systemInfo
+	status, raw := h.do(http.MethodGet, "/api/teacher/system", nil, true)
+	h.mustJSON(status, raw, &sys)
+
+	if sys.Sandbox == "" {
+		t.Error("system panel does not state what the sandbox enforces")
+	}
+	if sys.Options.CPPStd == "" || sys.Options.CStd == "" {
+		t.Errorf("language standards not reported: %+v", sys.Options)
+	}
+
+	// Changing the standard must persist and come back.
+	status, raw = h.do(http.MethodPut, "/api/teacher/system/toolchain", toolchainSettings{
+		CPPStd: "c++17", CStd: "c99",
+	}, true)
+	h.mustJSON(status, raw, &sys)
+	if sys.Options.CPPStd != "c++17" || sys.Options.CStd != "c99" {
+		t.Errorf("standards not applied: %+v", sys.Options)
+	}
+
+	// A nonsense standard must fall back rather than be stored.
+	status, raw = h.do(http.MethodPut, "/api/teacher/system/toolchain", toolchainSettings{
+		CPPStd: "c++99",
+	}, true)
+	h.mustJSON(status, raw, &sys)
+	if sys.Options.CPPStd != judge.DefaultOptions().CPPStd {
+		t.Errorf("bad standard was stored: %s", sys.Options.CPPStd)
+	}
 }

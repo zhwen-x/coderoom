@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 
 	"coderoom/internal/server"
@@ -75,6 +76,24 @@ func printBanner(srv *server.Server, dataDir string) {
 	fmt.Printf("  数据目录   %s\n", dataDir)
 	fmt.Printf("  监听地址   %s\n", cfg.Addr)
 	fmt.Printf("  判题并发   %d\n", cfg.Workers)
+
+	// Surfaced at startup so a missing compiler is noticed before an exam
+	// rather than when the first submission comes back as a system error.
+	avail := srv.JudgeableLanguages()
+	names := map[string]string{"cpp": "C++", "c": "C", "python": "Python"}
+	var ok, missing []string
+	for _, lang := range []string{"cpp", "c", "python"} {
+		if avail[lang] {
+			ok = append(ok, names[lang])
+		} else {
+			missing = append(missing, names[lang])
+		}
+	}
+	fmt.Printf("  可判语言   %s\n", strings.Join(ok, " / "))
+	if len(missing) > 0 {
+		fmt.Printf("  ⚠ 不可判   %s —— 请在教师端「系统」中配置编译器路径\n",
+			strings.Join(missing, " / "))
+	}
 	fmt.Println()
 	fmt.Println("  教师端请在浏览器打开（含管理口令，请勿转发给学生）:")
 	fmt.Printf("     %s\n", srv.AdminURL())

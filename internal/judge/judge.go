@@ -56,21 +56,31 @@ const (
 // Judger compiles and runs submissions.
 type Judger struct {
 	tc       Toolchain
+	opts     Options
 	runner   Runner
 	workRoot string
 }
 
 func New(tc Toolchain, runner Runner, workRoot string) *Judger {
 	if runner == nil {
-		runner = DefaultRunner{}
+		runner = NewRunner()
 	}
-	return &Judger{tc: tc, runner: runner, workRoot: workRoot}
+	return &Judger{tc: tc, opts: DefaultOptions(), runner: runner, workRoot: workRoot}
 }
 
 func (j *Judger) Toolchain() Toolchain { return j.tc }
+func (j *Judger) Options() Options     { return j.opts }
 
 // SetToolchain swaps the resolved compiler paths (teacher changed the config).
 func (j *Judger) SetToolchain(tc Toolchain) { j.tc = tc }
+
+// SetOptions swaps the compiler settings, falling back to the defaults for
+// anything unrecognised and reporting what it rejected.
+func (j *Judger) SetOptions(opts Options) []string {
+	normalized, warnings := opts.Normalize()
+	j.opts = normalized
+	return warnings
+}
 
 func exeFileName() string {
 	if isWindows() {
@@ -119,12 +129,16 @@ func (j *Judger) Judge(ctx context.Context, req Request) (*Result, error) {
 
 	// ---- compile -----------------------------------------------------------
 	var compileLog string
-	if len(lang.CompileArgs) > 0 {
-		argv := append([]string{tool}, expand(lang.CompileArgs, repl)...)
+	if compileArgs := lang.CompileArgs(j.opts); len(compileArgs) > 0 {
+		argv := append([]string{tool}, expand(compileArgs, repl)...)
 		cres, err := j.runner.Run(ctx, RunRequest{
 			Dir:       dir,
 			Argv:      argv,
 			WallLimit: compileWallLimit,
+			// Compilers need far more memory than a student program is
+			// allowed, and gcc spawns cc1plus/as/ld, so the sandbox's memory
+			// and process-count limits must not apply here.
+			Compile: true,
 		})
 		if err != nil {
 			return systemError("编译器启动失败: " + err.Error()), nil

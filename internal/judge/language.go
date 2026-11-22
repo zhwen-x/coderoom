@@ -117,53 +117,114 @@ func resolve(override, baseDir string, bundled, onPath []string) string {
 	return ""
 }
 
-// Language describes how to build and run one language.
-type Language struct {
-	ID   string
-	Name string
-	Ext  string
-	// CompileArgs/RunArgs use the placeholders {tool} {src} {exe} {dir}.
-	CompileArgs []string
-	RunArgs     []string
+// Options are the judge-wide compiler settings a teacher can adjust.
+//
+// The lab uses Visual Studio, Dev-C++, PyCharm and IDLE, so the judge only has
+// to agree with whatever those produce for ordinary coursework code. The
+// language standard is exposed because that is the one setting that can make
+// code which builds in the lab fail on the server.
+type Options struct {
+	CPPStd string `json:"cpp_std"` // e.g. c++14
+	CStd   string `json:"c_std"`   // e.g. c11
 }
 
-// Languages is the M0/M1 language set.
+// Known standards. A typo here would make every submission in an exam fail to
+// compile, so an unrecognised value falls back to the default rather than
+// being passed to gcc.
+var (
+	knownCPPStd = map[string]bool{
+		"c++98": true, "c++03": true, "c++11": true, "c++14": true,
+		"c++17": true, "c++20": true, "gnu++11": true, "gnu++14": true,
+		"gnu++17": true, "gnu++20": true,
+	}
+	knownCStd = map[string]bool{
+		"c89": true, "c90": true, "c99": true, "c11": true, "c17": true,
+		"gnu89": true, "gnu99": true, "gnu11": true, "gnu17": true,
+	}
+)
+
+// DefaultOptions targets the common denominator of the lab's toolchains.
+// C++14 is what current Visual Studio and any recent MinGW both accept.
+func DefaultOptions() Options {
+	return Options{CPPStd: "c++14", CStd: "c11"}
+}
+
+// Normalize replaces blank or unrecognised standards with the defaults and
+// reports what it changed, so the teacher UI can say so instead of failing
+// silently at exam time.
+func (o Options) Normalize() (Options, []string) {
+	def := DefaultOptions()
+	var warnings []string
+
+	if o.CPPStd == "" {
+		o.CPPStd = def.CPPStd
+	} else if !knownCPPStd[o.CPPStd] {
+		warnings = append(warnings,
+			fmt.Sprintf("无法识别的 C++ 标准 %q，已回退为 %s", o.CPPStd, def.CPPStd))
+		o.CPPStd = def.CPPStd
+	}
+	if o.CStd == "" {
+		o.CStd = def.CStd
+	} else if !knownCStd[o.CStd] {
+		warnings = append(warnings,
+			fmt.Sprintf("无法识别的 C 标准 %q，已回退为 %s", o.CStd, def.CStd))
+		o.CStd = def.CStd
+	}
+	return o, warnings
+}
+
+// Language describes how to build and run one language.
+type Language struct {
+	ID      string
+	Name    string
+	Ext     string
+	RunArgs []string // placeholders {src} {exe}
+}
+
+// Languages is the supported language set.
 var Languages = map[string]Language{
 	protocol.LangCPP: {
 		ID: protocol.LangCPP, Name: "C++", Ext: "cpp",
-		CompileArgs: cppCompileArgs(),
-		RunArgs:     []string{"{exe}"},
+		RunArgs: []string{"{exe}"},
 	},
 	protocol.LangC: {
 		ID: protocol.LangC, Name: "C", Ext: "c",
-		CompileArgs: cCompileArgs(),
-		RunArgs:     []string{"{exe}"},
+		RunArgs: []string{"{exe}"},
 	},
 	protocol.LangPython: {
 		ID: protocol.LangPython, Name: "Python", Ext: "py",
-		// py_compile turns a syntax error into a CE with a real message,
-		// instead of a runtime error on every single test case.
-		CompileArgs: []string{"-m", "py_compile", "{src}"},
-		RunArgs:     []string{"-u", "{src}"},
+		RunArgs: []string{"-u", "{src}"},
 	},
 }
 
-func cppCompileArgs() []string {
-	args := []string{"-O2", "-std=c++14", "-w", "-o", "{exe}", "{src}"}
+// CompileArgs returns the arguments for the compile step, or nil when the
+// language has none. Placeholders {src} and {exe} are substituted by the caller.
+func (l Language) CompileArgs(opts Options) []string {
+	switch l.ID {
+	case protocol.LangCPP:
+		return gccArgs(opts.CPPStd)
+	case protocol.LangC:
+		return gccArgs(opts.CStd)
+	case protocol.LangPython:
+		// py_compile turns a syntax error into a CE with a real message,
+		// instead of a runtime error on every single test case.
+		return []string{"-m", "py_compile", "{src}"}
+	}
+	return nil
+}
+
+func gccArgs(std string) []string {
+	args := []string{"-O2", "-w"}
+	if std != "" {
+		args = append(args, "-std="+std)
+	}
 	if runtime.GOOS == "windows" {
 		// Static linking avoids "libstdc++-6.dll not found" when the judge
 		// runs a binary built by the bundled MinGW.
-		args = append([]string{"-static"}, args...)
+		args = append(args, "-static")
 	}
-	return append(args, "-lm")
-}
-
-func cCompileArgs() []string {
-	args := []string{"-O2", "-std=c11", "-w", "-o", "{exe}", "{src}"}
-	if runtime.GOOS == "windows" {
-		args = append([]string{"-static"}, args...)
-	}
-	return append(args, "-lm")
+	// Libraries go after the sources, which is what gcc's linker expects.
+	return append(args, "-o", "{exe}", "{src}", "-lm")
 }
 
 // NeedsExecutable reports whether the compile step produces a binary that the

@@ -223,8 +223,20 @@ func (s *Store) Enqueue(ctx context.Context, submissionID int64, priority int) e
 		VALUES(?,?,'pending',?)
 		ON CONFLICT(submission_id) DO UPDATE SET
 		  state='pending', priority=excluded.priority, worker='', error='',
-		  enqueued_at=excluded.enqueued_at, started_at=NULL, finished_at=NULL`,
+		  attempts=0, enqueued_at=excluded.enqueued_at,
+		  started_at=NULL, finished_at=NULL`,
 		submissionID, priority, NowMS())
+	return err
+}
+
+// RetryTask puts a task back on the queue after a judge-side failure, keeping
+// the attempt count so the retry budget actually runs out. Enqueue resets that
+// count because it means a human asked for a fresh judging run.
+func (s *Store) RetryTask(ctx context.Context, taskID int64, lastErr string) error {
+	_, err := s.exec(ctx, `
+		UPDATE judge_tasks SET state='pending', worker='', error=?,
+		  started_at=NULL, finished_at=NULL
+		WHERE id=?`, lastErr, taskID)
 	return err
 }
 
@@ -259,7 +271,8 @@ func (s *Store) EnqueueExamFinals(ctx context.Context, examID int64) (int, error
 				INSERT INTO judge_tasks(submission_id, priority, state, enqueued_at)
 				VALUES(?,0,'pending',?)
 				ON CONFLICT(submission_id) DO UPDATE SET
-				  state='pending', worker='', error='', enqueued_at=excluded.enqueued_at,
+				  state='pending', worker='', error='', attempts=0,
+				  enqueued_at=excluded.enqueued_at,
 				  started_at=NULL, finished_at=NULL`, id, now)
 			if err != nil {
 				return err

@@ -27,10 +27,26 @@ type systemInfo struct {
 	Toolchain     judge.Toolchain `json:"toolchain"`
 	Available     map[string]bool `json:"available"`
 	Override      judge.Toolchain `json:"override"`
+	Options       judge.Options   `json:"options"`
+	Sandbox       string          `json:"sandbox"`
+	Warnings      []string        `json:"warnings"`
 }
 
 func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 	tc := s.judger.Toolchain()
+	avail := tc.Available()
+
+	warnings := []string{}
+	for lang, name := range map[string]string{
+		protocol.LangCPP: "C++", protocol.LangC: "C", protocol.LangPython: "Python",
+	} {
+		if !avail[lang] {
+			warnings = append(warnings,
+				fmt.Sprintf("%s 不可判题：未找到编译/解释器。考试前请配置路径或放入便携工具链。", name))
+		}
+	}
+	sort.Strings(warnings)
+
 	writeJSON(w, http.StatusOK, systemInfo{
 		Version:       ClientVersion,
 		Port:          s.Port(),
@@ -39,26 +55,47 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 		Workers:       s.cfg.Workers,
 		JudgeQueue:    s.judgeStatus(r.Context()),
 		Toolchain:     tc,
-		Available:     tc.Available(),
+		Available:     avail,
 		Override:      s.cfg.Toolchain,
+		Options:       s.judger.Options(),
+		Sandbox:       judge.SandboxDescription(),
+		Warnings:      warnings,
 	})
 }
 
 // handleSetToolchain lets the teacher pin the judge to specific compilers.
 // This exists because a judge whose gcc differs from the lab's IDE produces
 // "compiles on my machine, CE on the server" complaints.
+type toolchainSettings struct {
+	GXX    string `json:"gxx"`
+	GCC    string `json:"gcc"`
+	Python string `json:"python"`
+	CPPStd string `json:"cpp_std"`
+	CStd   string `json:"c_std"`
+}
+
 func (s *Server) handleSetToolchain(w http.ResponseWriter, r *http.Request) {
-	var override judge.Toolchain
-	if err := readJSON(r, &override); err != nil {
+	var body toolchainSettings
+	if err := readJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "请求格式错误")
 		return
 	}
+	override := judge.Toolchain{GXX: body.GXX, GCC: body.GCC, Python: body.Python}
+	warnings := s.judger.SetOptions(judge.Options{CPPStd: body.CPPStd, CStd: body.CStd})
+	s.judger.SetToolchain(judge.DetectToolchain(s.baseDir, override))
+
 	s.cfg.Toolchain = override
+	s.cfg.Language = s.judger.Options()
 	if err := s.saveConfig(); err != nil {
 		writeError(w, http.StatusInternalServerError, "config_error", err.Error())
 		return
 	}
-	s.judger.SetToolchain(judge.DetectToolchain(s.baseDir, override))
+	s.audit(r, "system.toolchain", "", map[string]any{
+		"cpp_std": s.cfg.Language.CPPStd, "c_std": s.cfg.Language.CStd,
+	})
+	for _, warn := range warnings {
+		s.logger.Printf("判题配置: %s", warn)
+	}
 	s.handleSystem(w, r)
 }
 
