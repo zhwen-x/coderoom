@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"coderoom/internal/protocol"
 )
@@ -134,10 +135,16 @@ type PaperItemInput struct {
 	Score     int   `json:"score"`
 }
 
-// CreateExam inserts the exam and, for M0, immediately materialises a single
-// class-scope paper from the supplied problem list. M2 replaces the explicit
-// list with template-driven generation; the papers/paper_items tables do not
-// change, only who fills them.
+// CreateExam inserts the exam and materialises its paper where it can.
+//
+// Three shapes are supported, all landing in the same papers/paper_items
+// tables:
+//
+//   - an explicit problem list, which becomes one class-wide paper;
+//   - a template with per_student_paper off, generated once here so the
+//     teacher can review the actual paper before the exam;
+//   - a template with per_student_paper on, where nothing is generated now -
+//     each student's paper is drawn on their first login.
 func (s *Store) CreateExam(ctx context.Context, e *Exam, items []PaperItemInput) error {
 	e.normalize()
 	policy, err := json.Marshal(e.Policy)
@@ -146,7 +153,7 @@ func (s *Store) CreateExam(ctx context.Context, e *Exam, items []PaperItemInput)
 	}
 	now := NowMS()
 
-	return s.write(ctx, func(tx *sql.Tx) error {
+	err = s.write(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx, `
 			INSERT INTO exams(name, type, paper_template_id, per_student_paper,
 			  start_at, end_at, duration_min, roster_required, passcode,
@@ -164,8 +171,72 @@ func (s *Store) CreateExam(ctx context.Context, e *Exam, items []PaperItemInput)
 			return err
 		}
 		e.CreatedAt, e.UpdatedAt = now, now
+		if len(items) == 0 {
+			// Template-driven: generated here for a class paper, or lazily at
+			// login for per-student papers.
+			return nil
+		}
 		return insertPaperTx(ctx, tx, e.ID, nil, "class", "", items)
 	})
+	if err != nil {
+		return err
+	}
+
+	if len(items) == 0 && e.PaperTemplateID != nil && !e.PerStudentPaper {
+		if _, err := s.EnsurePaperForStudent(ctx, e, ""); err != nil {
+			return fmt.Errorf("按模板生成班级试卷失败: %w", err)
+		}
+	}
+	return nil
+}
+
+// EnsurePaperForStudent returns the student's paper, drawing one from the
+// exam's template if they do not have it yet.
+//
+// Generating on first login (rather than up front from a roster) is what lets
+// an exam run in free-entry mode and still accept a student who arrives late:
+// nobody needs to exist in a list beforehand. The draw is deterministic in
+// (template nonce, exam, student), so a client restart hands back the same
+// paper rather than reshuffling the questions mid-exam.
+func (s *Store) EnsurePaperForStudent(ctx context.Context, e *Exam, studentNo string) (*Paper, error) {
+	if p, err := s.PaperForStudent(ctx, e.ID, studentNo); err == nil {
+		return p, nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+	if e.PaperTemplateID == nil {
+		return nil, ErrNotFound // explicit paper expected, but none was created
+	}
+
+	scope, owner := "class", ""
+	if e.PerStudentPaper {
+		scope, owner = "student", studentNo
+	}
+	gen, err := s.GeneratePaperFor(ctx, *e.PaperTemplateID, e.ID, owner)
+	if err != nil {
+		return nil, err
+	}
+
+	err = s.write(ctx, func(tx *sql.Tx) error {
+		// Two students logging in at the same moment would otherwise both
+		// generate the class paper. Re-check inside the write transaction.
+		var existing int64
+		row := tx.QueryRowContext(ctx, `
+			SELECT id FROM papers
+			WHERE exam_id=? AND scope=? AND student_no=? LIMIT 1`, e.ID, scope, owner)
+		switch err := row.Scan(&existing); {
+		case err == nil:
+			return nil // someone else won the race; their paper stands
+		case errors.Is(err, sql.ErrNoRows):
+		default:
+			return err
+		}
+		return insertPaperTx(ctx, tx, e.ID, e.PaperTemplateID, scope, owner, gen.Items)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.PaperForStudent(ctx, e.ID, studentNo)
 }
 
 // insertPaperTx materialises one paper with its items.

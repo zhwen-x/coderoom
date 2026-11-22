@@ -140,7 +140,10 @@ CREATE TABLE IF NOT EXISTS submissions (
   code_path     TEXT NOT NULL,
   code_hash     TEXT NOT NULL,
   code_bytes    INTEGER NOT NULL DEFAULT 0,
-  created_at    INTEGER NOT NULL
+  created_at    INTEGER NOT NULL,
+  -- Set when the teacher promoted a timed snapshot into a real submission
+  -- because the student never pressed submit. Points at the snapshot row.
+  promoted_from INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_sub_session ON submissions(session_id, problem_id, kind, id DESC);
 CREATE INDEX IF NOT EXISTS idx_sub_exam    ON submissions(exam_id, kind, id DESC);

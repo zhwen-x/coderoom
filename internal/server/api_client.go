@@ -88,12 +88,17 @@ func (s *Server) handleClientLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	paper, err := s.st.PaperForStudent(r.Context(), exam.ID, req.StudentNo)
+	paper, err := s.st.EnsurePaperForStudent(r.Context(), exam, req.StudentNo)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusConflict, "no_paper", "教师尚未为该考试配置试卷")
 		return
 	} else if err != nil {
-		writeError(w, http.StatusInternalServerError, "db_error", err.Error())
+		// A generation failure here means the template cannot be satisfied
+		// (a filter matching nothing, say). Say so rather than returning a
+		// bare database error, because only the teacher can fix it.
+		s.logger.Printf("为 %s 生成试卷失败: %v", req.StudentNo, err)
+		writeError(w, http.StatusConflict, "paper_generation_failed",
+			"无法生成试卷，请联系教师检查组卷模板: "+err.Error())
 		return
 	}
 
@@ -180,7 +185,7 @@ func (s *Server) handleClientPaper(w http.ResponseWriter, r *http.Request, sess 
 		writeError(w, http.StatusInternalServerError, "db_error", err.Error())
 		return
 	}
-	paper, err := s.st.PaperForStudent(r.Context(), sess.ExamID, sess.StudentNo)
+	paper, err := s.st.EnsurePaperForStudent(r.Context(), exam, sess.StudentNo)
 	if err != nil {
 		writeError(w, http.StatusConflict, "no_paper", "试卷未配置")
 		return

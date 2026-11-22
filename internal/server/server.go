@@ -181,6 +181,14 @@ func (s *Server) routes() {
 	mux.HandleFunc("GET /api/teacher/problems/{id}/testcases", s.admin(s.handleGetTestcases))
 	mux.HandleFunc("PUT /api/teacher/problems/{id}/testcases", s.admin(s.handlePutTestcases))
 
+	mux.HandleFunc("GET /api/teacher/templates", s.admin(s.handleListTemplates))
+	mux.HandleFunc("POST /api/teacher/templates", s.admin(s.handleSaveTemplate))
+	mux.HandleFunc("GET /api/teacher/templates/{id}", s.admin(s.handleGetTemplate))
+	mux.HandleFunc("PUT /api/teacher/templates/{id}", s.admin(s.handleSaveTemplate))
+	mux.HandleFunc("DELETE /api/teacher/templates/{id}", s.admin(s.handleDeleteTemplate))
+	mux.HandleFunc("POST /api/teacher/templates/{id}/preview", s.admin(s.handlePreviewTemplate))
+	mux.HandleFunc("POST /api/teacher/templates/{id}/reroll", s.admin(s.handleRerollTemplate))
+
 	mux.HandleFunc("GET /api/teacher/exams", s.admin(s.handleListExams))
 	mux.HandleFunc("POST /api/teacher/exams", s.admin(s.handleCreateExam))
 	mux.HandleFunc("GET /api/teacher/exams/{id}", s.admin(s.handleGetExam))
@@ -194,6 +202,9 @@ func (s *Server) routes() {
 	mux.HandleFunc("GET /api/teacher/exams/{id}/scores", s.admin(s.handleExamScores))
 	mux.HandleFunc("GET /api/teacher/exams/{id}/scores.csv", s.admin(s.handleExamScoresCSV))
 	mux.HandleFunc("GET /api/teacher/exams/{id}/events", s.admin(s.handleExamEvents))
+	mux.HandleFunc("GET /api/teacher/exams/{id}/reconcile", s.admin(s.handleReconcile))
+	mux.HandleFunc("GET /api/teacher/exams/{id}/code.zip", s.admin(s.handleExportCode))
+	mux.HandleFunc("POST /api/teacher/sessions/{id}/promote", s.admin(s.handlePromoteSnapshot))
 
 	mux.HandleFunc("GET /api/teacher/submissions/{id}", s.admin(s.handleGetSubmission))
 	mux.HandleFunc("POST /api/teacher/submissions/{id}/judge", s.admin(s.handleRejudge))

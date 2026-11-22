@@ -47,6 +47,9 @@ type Submission struct {
 	CodeHash    string `json:"code_hash"`
 	CodeBytes   int    `json:"code_bytes"`
 	CreatedAt   int64  `json:"created_at"`
+	// PromotedFrom is the snapshot this submission was lifted from when the
+	// teacher repaired a missing hand-in. Nil for a normal submission.
+	PromotedFrom *int64 `json:"promoted_from"`
 }
 
 // SaveSubmission archives the code to disk and records the row. Every snapshot
@@ -79,11 +82,12 @@ func (s *Store) SaveSubmission(ctx context.Context, sub *Submission, code string
 		}
 		res, err := tx.ExecContext(ctx, `
 			INSERT INTO submissions(session_id, exam_id, student_no, problem_id,
-			  paper_item_id, language, kind, seq, code_path, code_hash, code_bytes, created_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+			  paper_item_id, language, kind, seq, code_path, code_hash, code_bytes,
+			  created_at, promoted_from)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			sub.SessionID, sub.ExamID, sub.StudentNo, sub.ProblemID, sub.PaperItemID,
 			sub.Language, sub.Kind, sub.Seq, sub.CodePath, sub.CodeHash,
-			sub.CodeBytes, sub.CreatedAt)
+			sub.CodeBytes, sub.CreatedAt, sub.PromotedFrom)
 		if err != nil {
 			return err
 		}
@@ -143,13 +147,13 @@ func (s *Store) ReadSubmissionCode(sub *Submission) (string, error) {
 }
 
 const submissionCols = `id, session_id, exam_id, student_no, problem_id, paper_item_id,
-	language, kind, seq, code_path, code_hash, code_bytes, created_at`
+	language, kind, seq, code_path, code_hash, code_bytes, created_at, promoted_from`
 
 func scanSubmission(sc interface{ Scan(...any) error }) (*Submission, error) {
 	var x Submission
 	err := sc.Scan(&x.ID, &x.SessionID, &x.ExamID, &x.StudentNo, &x.ProblemID,
 		&x.PaperItemID, &x.Language, &x.Kind, &x.Seq, &x.CodePath, &x.CodeHash,
-		&x.CodeBytes, &x.CreatedAt)
+		&x.CodeBytes, &x.CreatedAt, &x.PromotedFrom)
 	if err != nil {
 		return nil, err
 	}
@@ -575,6 +579,7 @@ type SubmissionRow struct {
 	TimeMS    int    `json:"time_ms"`
 	MemoryKB  int    `json:"memory_kb"`
 	TaskState string `json:"task_state"`
+	Promoted  bool   `json:"promoted"`
 }
 
 func (s *Store) ListSubmissionRows(ctx context.Context, examID int64, kind string, limit int) ([]SubmissionRow, error) {
@@ -585,7 +590,8 @@ func (s *Store) ListSubmissionRows(ctx context.Context, examID int64, kind strin
 		SELECT s.id, s.student_no, sess.name, s.problem_id, s.language, s.kind, s.seq,
 		       s.code_bytes, s.created_at,
 		       COALESCE(r.verdict,''), COALESCE(r.score,0), COALESCE(r.max_score,0),
-		       COALESCE(r.time_ms,0), COALESCE(r.memory_kb,0), COALESCE(t.state,'')
+		       COALESCE(r.time_ms,0), COALESCE(r.memory_kb,0), COALESCE(t.state,''),
+		       s.promoted_from IS NOT NULL
 		FROM submissions s
 		JOIN sessions sess ON sess.id = s.session_id
 		LEFT JOIN judge_results r ON r.submission_id = s.id
@@ -610,7 +616,7 @@ func (s *Store) ListSubmissionRows(ctx context.Context, examID int64, kind strin
 		var x SubmissionRow
 		if err := rows.Scan(&x.ID, &x.StudentNo, &x.Name, &x.ProblemID, &x.Language,
 			&x.Kind, &x.Seq, &x.CodeBytes, &x.CreatedAt, &x.Verdict, &x.Score,
-			&x.MaxScore, &x.TimeMS, &x.MemoryKB, &x.TaskState); err != nil {
+			&x.MaxScore, &x.TimeMS, &x.MemoryKB, &x.TaskState, &x.Promoted); err != nil {
 			return nil, err
 		}
 		if x.Verdict == "" {
@@ -653,7 +659,8 @@ func (s *Store) GetJudgeResult(ctx context.Context, submissionID int64) (*JudgeR
 func (s *Store) SnapshotTimeline(ctx context.Context, sessionID, problemID int64) ([]SubmissionRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT s.id, s.student_no, sess.name, s.problem_id, s.language, s.kind, s.seq,
-		       s.code_bytes, s.created_at, '', 0, 0, 0, 0, ''
+		       s.code_bytes, s.created_at, '', 0, 0, 0, 0, '',
+		       s.promoted_from IS NOT NULL
 		FROM submissions s
 		JOIN sessions sess ON sess.id = s.session_id
 		WHERE s.session_id=? AND s.problem_id=?
@@ -668,10 +675,24 @@ func (s *Store) SnapshotTimeline(ctx context.Context, sessionID, problemID int64
 		var x SubmissionRow
 		if err := rows.Scan(&x.ID, &x.StudentNo, &x.Name, &x.ProblemID, &x.Language,
 			&x.Kind, &x.Seq, &x.CodeBytes, &x.CreatedAt, &x.Verdict, &x.Score,
-			&x.MaxScore, &x.TimeMS, &x.MemoryKB, &x.TaskState); err != nil {
+			&x.MaxScore, &x.TimeMS, &x.MemoryKB, &x.TaskState, &x.Promoted); err != nil {
 			return nil, err
 		}
 		out = append(out, x)
 	}
 	return out, rows.Err()
+}
+
+// LatestFinal returns the newest final submission for one student+problem, or
+// nil when they never submitted.
+func (s *Store) LatestFinal(ctx context.Context, sessionID, problemID int64) (*Submission, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+submissionCols+` FROM submissions
+		 WHERE session_id=? AND problem_id=? AND kind='final'
+		 ORDER BY id DESC LIMIT 1`, sessionID, problemID)
+	sub, err := scanSubmission(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return sub, err
 }

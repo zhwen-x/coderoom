@@ -91,7 +91,60 @@ func (s *Store) migrate() error {
 	if err != nil {
 		return fmt.Errorf("stamp schema version: %w", err)
 	}
+	return s.addColumns()
+}
+
+// addedColumn is a column introduced after the initial schema. schema.sql
+// carries the current shape for a fresh database; this list brings an existing
+// one up to date. Keeping both means a teacher who already ran an exam does
+// not lose their data on an upgrade.
+type addedColumn struct {
+	table, column, ddl string
+}
+
+var addedColumns = []addedColumn{
+	// M2: a submission the teacher promoted from a timed snapshot, because the
+	// student wrote code but never pressed submit. Records which snapshot it
+	// came from so the gradebook can show it was not a normal hand-in.
+	{"submissions", "promoted_from", "INTEGER"},
+}
+
+func (s *Store) addColumns() error {
+	for _, c := range addedColumns {
+		has, err := s.hasColumn(c.table, c.column)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", c.table, c.column, c.ddl)
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("add column %s.%s: %w", c.table, c.column, err)
+		}
+	}
 	return nil
+}
+
+func (s *Store) hasColumn(table, column string) (bool, error) {
+	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // write runs fn inside a serialised write transaction.

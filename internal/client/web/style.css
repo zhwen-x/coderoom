@@ -75,6 +75,9 @@ input, select {
 }
 label { display: grid; gap: .25rem; font-size: .85rem; color: var(--muted); }
 
+/* A checkbox or radio must not inherit the full-width rule above: inside a
+   flex row it would eat the whole line and push its own label onto the next. */
+input[type=checkbox], input[type=radio] { width: auto; margin: 0; }
 /* screens */
 .screen { height: 100%; display: grid; place-items: center; padding: 1rem; }
 .screen.main { display: block; padding: 0; }

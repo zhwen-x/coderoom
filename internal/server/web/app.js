@@ -153,8 +153,9 @@ function switchView(v) {
 
 function render() {
   const views = {
-    exams: viewExams, problems: viewProblems, monitor: viewMonitor,
-    submissions: viewSubmissions, scores: viewScores, system: viewSystem,
+    exams: viewExams, problems: viewProblems, templates: viewTemplates,
+    monitor: viewMonitor, submissions: viewSubmissions, scores: viewScores,
+    reconcile: viewReconcile, system: viewSystem,
   };
   (views[S.view] || viewExams)();
 }
@@ -263,6 +264,18 @@ function examControlPanel() {
       '发布后学生可登录但看不到题面；开考后才下发题面并开始倒计时。'),
   );
   api(`/exams/${e.id}`).then((d) => {
+    if (e.per_student_paper) {
+      // Each student draws their own paper at login, so there is no single
+      // paper to show here; the template preview is where the rules live.
+      box.append(el('p', { class: 'muted' },
+        '本场为「每人一卷」：每个学生登录时按组卷模板各抽一套。' +
+        '要查看出题规则和模拟抽取结果，请到「组卷」中点「预览组卷」。'));
+      return;
+    }
+    if (!d.items.length) {
+      box.append(el('p', { class: 'warn' }, '⚠ 这场考试还没有题目。'));
+      return;
+    }
     box.append(el('div', { class: 'scroll' }, el('table', {},
       el('thead', {}, el('tr', {},
         el('th', {}, '题号'), el('th', {}, '题目'), el('th', { class: 'num' }, '分值'),
@@ -277,8 +290,9 @@ function examControlPanel() {
 }
 
 async function openExamEditor() {
-  if (!S.problems.length) S.problems = await api('/problems');
-  if (!S.problems.length) {
+  const [problems, templates] = await Promise.all([api('/problems'), api('/templates')]);
+  S.problems = problems;
+  if (!problems.length) {
     toast('请先在「题库」中创建题目', true);
     return;
   }
@@ -291,6 +305,17 @@ async function openExamEditor() {
   const roster = el('input', { type: 'checkbox' });
   const rejudge = el('input', { type: 'checkbox' });
   rejudge.checked = true;
+
+  // Problems come either from a hand-picked list or from a template. Only a
+  // template can produce a different paper per student, because each draw
+  // happens when that student logs in.
+  const source = el('select', {},
+    el('option', { value: 'manual' }, '手动选题（全班同一套卷）'),
+    el('option', { value: 'template', disabled: !templates.length },
+      templates.length ? '使用组卷模板' : '使用组卷模板（还没有模板）'));
+  const tplSel = el('select', {}, ...templates.map((t) =>
+    el('option', { value: t.id }, `${t.name}（${t.items.length} 题 / ${t.total_score} 分）`)));
+  const perStudent = el('input', { type: 'checkbox' });
 
   const picks = el('div', { class: 'caselist' });
   const addPick = (problemId = S.problems[0].id, score = 10) => {
@@ -305,6 +330,23 @@ async function openExamEditor() {
   };
   addPick();
 
+  const manualWrap = el('div', {},
+    el('div', { class: 'row' }, el('h3', {}, '试卷题目'),
+      el('button', { onclick: () => addPick() }, '添加题目')),
+    picks);
+  const templateWrap = el('div', {},
+    el('label', {}, '组卷模板', tplSel),
+    el('label', { class: 'row' }, perStudent, '每人一卷（每个学生登录时各抽一套）'),
+    el('p', { class: 'muted small' },
+      '不勾选则按模板生成一套全班共用的卷。建议先在「组卷」里点「预览组卷」确认能正常出题。'));
+
+  const syncSource = () => {
+    manualWrap.hidden = source.value !== 'manual';
+    templateWrap.hidden = source.value !== 'template';
+  };
+  source.addEventListener('change', syncSource);
+  syncSource();
+
   showModal('新建考试 / 练习', [
     el('div', { class: 'grid2' },
       el('label', {}, '名称', name),
@@ -316,18 +358,21 @@ async function openExamEditor() {
       el('label', { class: 'row' }, roster, '要求学号姓名与名单匹配'),
       el('label', { class: 'row' }, rejudge, '允许重复提交'),
     ),
-    el('div', {},
-      el('div', { class: 'row' }, el('h3', {}, '试卷题目'),
-        el('button', { onclick: () => addPick() }, '添加题目')),
-      picks),
+    el('label', {}, '题目来源', source),
+    manualWrap,
+    templateWrap,
   ], [
     el('button', { onclick: closeModal }, '取消'),
     el('button', {
       class: 'primary',
       onclick: async () => {
-        const items = [...picks.children].map((r) => r._get()).filter((x) => x.problem_id);
         if (!name.value.trim()) return toast('请填写名称', true);
-        if (!items.length) return toast('请至少添加一道题目', true);
+        const useTemplate = source.value === 'template';
+        const items = useTemplate
+          ? []
+          : [...picks.children].map((r) => r._get()).filter((x) => x.problem_id);
+        if (!useTemplate && !items.length) return toast('请至少添加一道题目', true);
+        if (useTemplate && !tplSel.value) return toast('请选择组卷模板', true);
         try {
           await api('/exams', {
             method: 'POST',
@@ -340,6 +385,8 @@ async function openExamEditor() {
               allow_rejudge: rejudge.checked,
               show_results: type.value === 'practice',
               state: 'draft',
+              paper_template_id: useTemplate ? Number(tplSel.value) : null,
+              per_student_paper: useTemplate && perStudent.checked,
               items,
             }),
           });
@@ -819,3 +866,288 @@ async function viewSystem() {
 }
 
 bootGate();
+
+// ------------------------------------------------------------ 组卷模板视图
+
+const PICK_LABEL = { fixed: '指定题目', pool: '从题目池抽取', filter: '按条件抽取' };
+
+async function viewTemplates() {
+  const [templates, problems] = await Promise.all([api('/templates'), api('/problems')]);
+  S.problems = problems;
+
+  const rows = templates.map((t) => el('tr', {},
+    el('td', {}, t.name),
+    el('td', { class: 'num' }, t.items.length + ' 题'),
+    el('td', { class: 'num' }, t.total_score + ' 分'),
+    el('td', {}, t.items.map((it) => PICK_LABEL[it.pick_type] || it.pick_type).join(' / ')),
+    el('td', { class: 'row' },
+      el('button', { onclick: () => openTemplateEditor(t) }, '编辑'),
+      el('button', { onclick: () => previewTemplate(t.id) }, '预览组卷'),
+      el('button', {
+        onclick: async () => {
+          try {
+            await api(`/templates/${t.id}/reroll`, { method: 'POST' });
+            toast('已重新随机，之后生成的试卷会换一批题目');
+          } catch (e) { toast(e.message, true); }
+        },
+      }, '重新随机'),
+      el('button', {
+        class: 'danger',
+        onclick: async () => {
+          if (!confirm(`删除组卷模板「${t.name}」？已据此生成的试卷不受影响。`)) return;
+          try { await api(`/templates/${t.id}`, { method: 'DELETE' }); viewTemplates(); toast('已删除'); }
+          catch (e) { toast(e.message, true); }
+        },
+      }, '删除')),
+  ));
+
+  setMain(el('div', { class: 'panel' },
+    el('div', { class: 'row' },
+      el('h2', {}, '组卷模板'),
+      el('button', { class: 'primary', onclick: () => openTemplateEditor(null) }, '新建模板'),
+      el('button', { onclick: viewTemplates }, '刷新')),
+    el('p', { class: 'muted' },
+      '模板描述的是「怎么出题」而不是具体题目。创建考试时选用模板，可以生成全班同一套卷，' +
+      '也可以为每个学生各抽一套。每题位的难度固定，所以不同学生的成绩仍然可比。'),
+    templates.length
+      ? el('div', { class: 'scroll' }, el('table', {},
+          el('thead', {}, el('tr', {},
+            ...['名称', '题数', '总分', '取题方式', '操作'].map((h) => el('th', {}, h)))),
+          el('tbody', {}, rows)))
+      : el('div', { class: 'empty' }, '还没有组卷模板。固定题目的考试可以直接在「考试/练习」里手动选题。')));
+}
+
+// templateItemRow builds the editor for one slot of a template.
+function templateItemRow(item, onRemove) {
+  const pick = el('select', {}, ...Object.entries(PICK_LABEL).map(([v, label]) =>
+    el('option', { value: v, selected: v === item.pick_type }, label)));
+  const score = el('input', { type: 'number', value: item.score || 10, min: '1' });
+
+  const fixedSel = el('select', {}, ...S.problems.map((p) =>
+    el('option', { value: p.id, selected: p.id === item.fixed_problem_id },
+      `#${p.id} ${p.title}${p.case_count ? '' : ' (无测试数据)'}`)));
+
+  const poolBox = el('div', { class: 'picklist' });
+  const poolChecks = S.problems.map((p) => {
+    const cb = el('input', { type: 'checkbox' });
+    cb.checked = (item.pool || []).includes(p.id);
+    cb._pid = p.id;
+    poolBox.append(el('label', { class: 'row' }, cb,
+      `#${p.id} ${p.title}`,
+      el('span', { class: 'tag' }, '难度 ' + p.difficulty),
+      p.case_count ? null : el('span', { class: 'warn' }, '无测试数据')));
+    return cb;
+  });
+
+  const f = item.filter || {};
+  const minD = el('input', { type: 'number', value: f.min_difficulty || 1, min: '1', max: '5' });
+  const maxD = el('input', { type: 'number', value: f.max_difficulty || 5, min: '1', max: '5' });
+  const tags = el('input', { value: (f.tags || []).join(','), placeholder: '留空表示不限，逗号分隔' });
+  const allTags = el('input', { type: 'checkbox' });
+  allTags.checked = !!f.require_all_tags;
+
+  const fixedWrap = el('div', {}, el('label', {}, '题目', fixedSel));
+  const poolWrap = el('div', {},
+    el('div', { class: 'muted small' }, '从下列题目中随机抽 1 道（适合针对某个知识点出题）'),
+    poolBox);
+  const filterWrap = el('div', {},
+    el('div', { class: 'grid2' },
+      el('label', {}, '最低难度', minD),
+      el('label', {}, '最高难度', maxD),
+      el('label', {}, '知识点标签', tags)),
+    el('label', { class: 'row' }, allTags, '必须同时具备全部标签（默认命中任一即可）'));
+
+  const sync = () => {
+    fixedWrap.hidden = pick.value !== 'fixed';
+    poolWrap.hidden = pick.value !== 'pool';
+    filterWrap.hidden = pick.value !== 'filter';
+  };
+  pick.addEventListener('change', sync);
+  sync();
+
+  const box = el('div', { class: 'case' },
+    el('div', { class: 'row' },
+      el('span', { class: 'idx' }),
+      el('label', { class: 'row' }, '取题方式', pick),
+      el('label', { class: 'row' }, '分值', score),
+      el('div', { class: 'spacer' }),
+      el('button', { class: 'danger', onclick: () => { box.remove(); onRemove(); } }, '移除题位')),
+    fixedWrap, poolWrap, filterWrap);
+
+  box._get = () => ({
+    pick_type: pick.value,
+    score: Number(score.value),
+    fixed_problem_id: pick.value === 'fixed' ? Number(fixedSel.value) : null,
+    pool: pick.value === 'pool' ? poolChecks.filter((c) => c.checked).map((c) => c._pid) : [],
+    filter: pick.value === 'filter' ? {
+      min_difficulty: Number(minD.value),
+      max_difficulty: Number(maxD.value),
+      tags: tags.value.split(',').map((t) => t.trim()).filter(Boolean),
+      require_all_tags: allTags.checked,
+    } : {},
+  });
+  return box;
+}
+
+async function openTemplateEditor(existing) {
+  if (!S.problems.length) S.problems = await api('/problems');
+  if (!S.problems.length) return toast('请先在「题库」中创建题目', true);
+
+  const name = el('input', { value: existing ? existing.name : '' });
+  const list = el('div', { class: 'caselist' });
+  const total = el('span', { class: 'muted' });
+
+  const renumber = () => {
+    [...list.children].forEach((box, i) => {
+      box.querySelector('.idx').textContent = `第 ${i + 1} 题`;
+    });
+    const sum = [...list.children].reduce((n, b) => n + (b._get().score || 0), 0);
+    total.textContent = `共 ${list.children.length} 题，总分 ${sum}`;
+  };
+  const addItem = (item = {}) => { list.append(templateItemRow(item, renumber)); renumber(); };
+
+  (existing ? existing.items : [{ pick_type: 'filter', score: 50 }]).forEach(addItem);
+  list.addEventListener('change', renumber);
+
+  showModal(existing ? `编辑模板「${existing.name}」` : '新建组卷模板', [
+    el('label', {}, '模板名称', name),
+    el('div', { class: 'row' },
+      el('h3', {}, '题位'),
+      el('button', { onclick: () => addItem({ pick_type: 'filter', score: 10 }) }, '添加题位'),
+      total),
+    list,
+  ], [
+    el('button', { onclick: closeModal }, '取消'),
+    el('button', {
+      class: 'primary',
+      onclick: async () => {
+        if (!name.value.trim()) return toast('请填写模板名称', true);
+        const items = [...list.children].map((b) => b._get());
+        if (!items.length) return toast('请至少添加一个题位', true);
+        const bad = items.find((it) => it.pick_type === 'pool' && !it.pool.length);
+        if (bad) return toast('有题位选择了「从题目池抽取」但没有勾选任何题目', true);
+        const body = { name: name.value.trim(), items };
+        try {
+          if (existing) {
+            await api(`/templates/${existing.id}`, { method: 'PUT', body: JSON.stringify({ ...body, id: existing.id }) });
+          } else {
+            await api('/templates', { method: 'POST', body: JSON.stringify(body) });
+          }
+          closeModal(); viewTemplates(); toast('已保存，建议点「预览组卷」确认能正常出题');
+        } catch (e) { toast(e.message, true); }
+      },
+    }, '保存'),
+  ]);
+}
+
+async function previewTemplate(id) {
+  let p;
+  try { p = await api(`/templates/${id}/preview`, { method: 'POST' }); }
+  catch (e) { return toast(e.message, true); }
+
+  const itemRows = p.items.map((it) => el('tr', {},
+    el('td', { class: 'num' }, it.idx),
+    el('td', {}, PICK_LABEL[it.pick_type] || it.pick_type),
+    el('td', { class: 'num' }, it.score),
+    el('td', {}, it.rule),
+    el('td', { class: 'num' },
+      it.candidates ? it.candidates : el('span', { class: 'err' }, '0 ⚠')),
+    el('td', { class: 'muted small' }, it.samples.join('、')),
+  ));
+
+  showModal(`组卷预览：${p.name}（总分 ${p.total_score}）`, [
+    p.error ? el('div', { class: 'err' }, '无法组卷：' + p.error) : null,
+    ...p.warnings.map((w) => el('div', { class: 'warn' }, '⚠ ' + w)),
+    !p.error && !p.warnings.length
+      ? el('div', { class: 'ok' }, '✓ 模板可以正常组卷')
+      : null,
+    el('div', {}, el('h3', {}, '各题位的可选范围'),
+      el('div', { class: 'scroll' }, el('table', {},
+        el('thead', {}, el('tr', {},
+          ...['题位', '取题方式', '分值', '规则', '可选题数', '示例题目'].map((h) => el('th', {}, h)))),
+        el('tbody', {}, itemRows)))),
+    p.samples.length ? el('div', {},
+      el('h3', {}, '模拟抽取（不同学生会抽到不同题目）'),
+      el('div', { class: 'scroll' }, el('table', {},
+        el('tbody', {}, p.samples.map((s) => el('tr', {},
+          el('td', { class: 'muted' }, s.student_no),
+          el('td', {}, s.titles.join('　|　')))))))) : null,
+  ], [el('button', { onclick: closeModal }, '关闭')]);
+}
+
+// ---------------------------------------------------------------- 对账视图
+
+const RECONCILE_LABEL = {
+  recoverable: { text: '有代码未提交', cls: 'err' },
+  absent: { text: '缺考', cls: 'warn' },
+  no_work: { text: '登录但无代码', cls: 'warn' },
+  incomplete: { text: '部分未答', cls: 'muted' },
+  complete: { text: '已完成', cls: 'ok' },
+};
+
+async function viewReconcile() {
+  if (!S.examId) return setMain(el('div', { class: 'empty' }, '请先在「考试/练习」中选择一场。'));
+  const d = await api(`/exams/${S.examId}/reconcile`);
+
+  const summary = el('div', { class: 'row' },
+    ...Object.entries(RECONCILE_LABEL)
+      .filter(([k]) => d.summary[k])
+      .map(([k, v]) => el('span', { class: 'tag' },
+        el('span', { class: v.cls }, v.text), ` ${d.summary[k]} 人`)));
+
+  const rows = d.rows.map((row) => {
+    const label = RECONCILE_LABEL[row.status] || { text: row.status, cls: 'muted' };
+    const cells = row.problems.map((p) => {
+      if (p.has_final) return el('span', { class: 'tag ok' }, `第${p.idx}题 已交`);
+      if (p.has_snapshot && p.snapshot_bytes > 0) {
+        return el('button', {
+          class: 'danger',
+          title: `最后快照 ${fmtTime(p.snapshot_at)}，${p.snapshot_bytes} 字节`,
+          onclick: async () => {
+            if (!confirm(
+              `用 ${row.name}(${row.student_no}) 第${p.idx}题的最后快照补交？\n\n` +
+              `快照时间：${fmtTime(p.snapshot_at)}\n代码长度：${p.snapshot_bytes} 字节\n\n` +
+              `补交的提交会标注来源，并记入操作日志。`)) return;
+            try {
+              const r = await api(`/sessions/${row.session_id}/promote`,
+                { method: 'POST', body: JSON.stringify({ problem_id: p.problem_id }) });
+              toast(r.message || '已补交');
+              viewReconcile();
+            } catch (e) { toast(e.message, true); }
+          },
+        }, `第${p.idx}题 补交`);
+      }
+      return el('span', { class: 'tag' }, `第${p.idx}题 无`);
+    });
+    return el('tr', {},
+      el('td', {}, el('span', { class: label.cls }, label.text)),
+      el('td', {}, row.class || '-'),
+      el('td', {}, row.student_no),
+      el('td', {}, row.name),
+      el('td', {}, row.login_at ? fmtTime(row.login_at) : '-'),
+      el('td', {}, row.submitted_at ? fmtTime(row.submitted_at) : '-'),
+      el('td', { class: 'row' }, cells.length ? cells : el('span', { class: 'muted' }, '-')));
+  });
+
+  setMain(el('div', { class: 'panel' },
+    el('div', { class: 'row' },
+      el('h2', {}, `考后对账：${d.exam_name}`),
+      el('button', { onclick: viewReconcile }, '刷新'),
+      el('a', { href: `/api/teacher/exams/${S.examId}/code.zip?t=${encodeURIComponent(S.token)}` },
+        el('button', { class: 'primary' }, '导出全部代码 (zip)'))),
+    summary,
+    el('p', { class: 'muted' },
+      '「有代码未提交」是学生写了代码但没点「提交判题」。可逐人用最后一次定时快照补交，' +
+      '补交的提交会标注来源并记入操作日志。'),
+    d.expected_classes.length
+      ? el('p', { class: 'muted small' },
+          `缺考是按已登录学生所在的班级（${d.expected_classes.map((c) => c || '未分班').join('、')}）` +
+          '与名单比对得出的；名单中其他班级的学生不计入。')
+      : null,
+    d.rows.length
+      ? el('div', { class: 'scroll' }, el('table', {},
+          el('thead', {}, el('tr', {},
+            ...['状态', '班级', '学号', '姓名', '登录时间', '交卷时间', '各题情况'].map((h) => el('th', {}, h)))),
+          el('tbody', {}, rows)))
+      : el('div', { class: 'empty' }, '还没有学生参加这场考试。')));
+}

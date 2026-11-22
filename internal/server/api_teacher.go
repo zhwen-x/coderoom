@@ -260,8 +260,15 @@ func (s *Server) handleCreateExam(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing_name", "名称不能为空")
 		return
 	}
-	if len(payload.Items) == 0 {
-		writeError(w, http.StatusBadRequest, "no_items", "请至少选择一道题目")
+	// An exam gets its problems either from an explicit list or from a
+	// template. Per-student papers can only come from a template, since each
+	// student's draw happens at their first login.
+	if len(payload.Items) == 0 && payload.PaperTemplateID == nil {
+		writeError(w, http.StatusBadRequest, "no_items", "请选择题目或指定组卷模板")
+		return
+	}
+	if payload.PerStudentPaper && payload.PaperTemplateID == nil {
+		writeError(w, http.StatusBadRequest, "no_template", "「每人一卷」需要先选择组卷模板")
 		return
 	}
 	e := payload.Exam
@@ -304,6 +311,12 @@ func (s *Server) handleGetExam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	detail := examDetail{Exam: e, Items: []examDetailItem{}}
+	if e.PerStudentPaper {
+		// There is no single paper to show: every student draws their own.
+		// The template preview is where the teacher inspects the rules.
+		writeJSON(w, http.StatusOK, detail)
+		return
+	}
 	if paper, err := s.st.PaperForStudent(r.Context(), id, ""); err == nil {
 		for _, it := range paper.Items {
 			dit := examDetailItem{Idx: it.Idx, ProblemID: it.ProblemID, Score: it.Score}
