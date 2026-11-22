@@ -14,3 +14,6 @@ toolchain/*
 *.exe
 *.test
 *.out
+
+# macOS
+.DS_Store
