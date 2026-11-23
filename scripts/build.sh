@@ -64,6 +64,9 @@ copy_note() {
   cat "$1" >> "$2"
 }
 copy_note packaging/server-readme.txt "$OUT/server/读我.txt"
+# A double-clickable helper: Explorer's "run as administrator" cannot pass the
+# -setup-firewall flag, so the teacher gets a script that elevates itself.
+cp packaging/setup-firewall.cmd "$OUT/server/放行防火墙.cmd"
 copy_note packaging/client-readme.txt "$OUT/client/读我.txt"
 
 echo

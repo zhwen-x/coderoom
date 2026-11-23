@@ -221,6 +221,12 @@ if ($payload.Count -gt 0) {
 # ------------------------------------------------------------ 说明文件
 
 Copy-Note (Join-Path $repo 'packaging\server-readme.txt') (Join-Path $serverDir '读我.txt')
+# A double-clickable helper: Explorer's "run as administrator" cannot pass the
+# -setup-firewall flag, so the teacher gets a script that elevates itself.
+# Copied verbatim - it is a batch file and must keep its CRLF line endings and
+# stay free of a BOM, which Copy-Note would add.
+Copy-Item -LiteralPath (Join-Path $repo 'packaging\setup-firewall.cmd') `
+          -Destination (Join-Path $serverDir '放行防火墙.cmd') -Force
 Copy-Note (Join-Path $repo 'packaging\client-readme.txt') (Join-Path $clientDir '读我.txt')
 
 # ---------------------------------------------------------------- 汇总
