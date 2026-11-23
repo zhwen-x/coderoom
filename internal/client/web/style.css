@@ -80,7 +80,17 @@ label { display: grid; gap: .25rem; font-size: .85rem; color: var(--muted); }
 input[type=checkbox], input[type=radio] { width: auto; margin: 0; }
 /* screens */
 .screen { height: 100%; display: grid; place-items: center; padding: 1rem; }
-.screen.main { display: block; padding: 0; }
+.screen.main {
+  display: block;
+  padding: 0;
+  /* .screen centres a login card with place-items. Overriding only `display`
+     leaves justify-items:center in force, and a centred block-level child is
+     sized shrink-to-fit: the three-pane layout then re-measured itself
+     whenever any text inside it changed length. Pasting code made the status
+     text go "" -> "未保存" -> "已保存到本机", and the whole layout visibly
+     jumped twice. */
+  place-items: normal;
+}
 .card {
   background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
   padding: 1.4rem; width: min(440px, 100%); display: grid; gap: .7rem;
@@ -155,6 +165,9 @@ header {
   border-bottom: 1px solid var(--border);
 }
 .editor-bar select { width: auto; }
+/* Reserve room for the longest status string so it never reflows the toolbar
+   around it, independent of the grid fix above. */
+#ed-saved { min-width: 7em; text-align: right; }
 .editor-host { flex: 1; min-height: 0; position: relative; }
 .result-box { max-height: 38%; overflow-y: auto; border-top: 1px solid var(--border); padding: .6rem; }
 

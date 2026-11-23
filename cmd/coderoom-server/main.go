@@ -62,7 +62,7 @@ func main() {
 		if err := server.SetupFirewall(srv.Port(), cfg.DiscoveryPort); err != nil {
 			logger.Fatalf("%v", err)
 		}
-		fmt.Printf("\n  已添加防火墙入站规则：TCP %d、UDP %d\n", srv.Port(), cfg.DiscoveryPort)
+		fmt.Println("\n  已添加防火墙入站规则（按程序授权，改端口后无需重新添加）。")
 		fmt.Println("  现在学生端应该可以连上了。")
 		return
 	}
