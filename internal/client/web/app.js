@@ -435,6 +435,15 @@ function renderStatus() {
   bits.push(el('span', { class: st.connected ? 'muted' : 'err' },
     st.connected ? '已连接' : '连接中断'));
   if (st.pending_uploads) bits.push(el('span', { class: 'warn' }, `${st.pending_uploads} 份待上传`));
+  // Students are told the room is monitored. Two words in the header, the
+  // detail in the 更多 sheet: a check nobody knows about deters nobody, and
+  // being up front about it is what keeps an argument afterwards short.
+  if ((st.monitors || []).length) {
+    bits.push(el('span', {
+      class: 'muted',
+      title: '本场启用的考场监控：' + st.monitors.join('、') + '。详见「更多」。',
+    }, '监考中'));
+  }
   sync.replaceChildren(...bits);
   sync.title = st.last_error || '与服务端同步正常';
 
@@ -486,6 +495,14 @@ $('#btn-menu').addEventListener('click', () => {
     el('div', { class: 'muted small' },
       `最后同步 ${st.last_sync_at ? new Date(st.last_sync_at).toLocaleTimeString() : '从未'} · ` +
       `待上传 ${st.pending_uploads} 份 · 待上报事件 ${st.pending_events} 条`),
+    el('hr'),
+    el('div', {}, el('strong', {}, '考场监控')),
+    (st.monitors || []).length
+      ? el('div', { class: 'muted small' },
+          `本场启用：${st.monitors.join('、')}。` +
+          '监控只记录并上报，不会阻止你做任何操作，也不读取你的文件内容。' +
+          '代码靠粘贴录入，所以剪贴板不会被禁用。')
+      : el('div', { class: 'muted small' }, '本场未启用考场监控。'),
     st.last_error ? el('div', { class: 'err small' }, st.last_error) : null,
     el('hr'),
     el('div', { class: 'row' },

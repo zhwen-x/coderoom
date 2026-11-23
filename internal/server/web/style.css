@@ -119,6 +119,15 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .dot.on { background: var(--ok); }
 .dot.off { background: var(--bad); }
 
+/* invigilation dashboard */
+.scroll.tall { max-height: 60vh; overflow-y: auto; }
+#main .panel tbody tr.row-alert > td:first-child { box-shadow: inset 2px 0 0 var(--bad); }
+#main .panel tbody tr.row-sel { background: var(--panel-2); }
+.link { color: var(--accent); cursor: pointer; text-decoration: underline dotted; }
+/* The monitor's student table selects a student on click, so the whole row
+   has to read as clickable rather than only the cells that look like links. */
+#main .panel tbody tr[title] { cursor: pointer; }
+
 pre.code {
   font-family: var(--mono); font-size: 12.5px; background: var(--panel-2);
   border: 1px solid var(--border); border-radius: 6px; padding: .6rem;

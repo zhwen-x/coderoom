@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"coderoom/internal/judge"
@@ -59,6 +60,20 @@ type Server struct {
 	baseDir string // directory of the executable: where a bundled toolchain lives
 	mux     *http.ServeMux
 	logger  *log.Logger
+
+	// stopping is closed when Run's context is cancelled. Long-lived handlers
+	// (the invigilation stream) watch it so Ctrl+C exits at once instead of
+	// waiting out the shutdown grace period with a dashboard still open.
+	// Cancelling request contexts wholesale would do the same in one line, but
+	// would also abort the ordinary requests graceful shutdown exists to let
+	// finish.
+	stopping chan struct{}
+
+	// skewSeen is the last clock offset reported per session, so a machine
+	// whose clock is merely wrong is reported once rather than on every
+	// heartbeat. In memory on purpose: it holds one int64 per logged-in
+	// student, and a restart re-reporting each skewed clock once is harmless.
+	skewSeen sync.Map
 }
 
 // New wires the server. baseDir is where a bundled toolchain is looked for.
@@ -81,12 +96,13 @@ func New(st *store.Store, cfg Config, baseDir string, logger *log.Logger) (*Serv
 
 	tc := judge.DetectToolchain(baseDir, cfg.Toolchain)
 	s := &Server{
-		cfg:     cfg,
-		cfgPath: cfgPath,
-		st:      st,
-		judger:  judge.New(tc, judge.NewRunner(), filepath.Join(st.DataDir(), "work")),
-		baseDir: baseDir,
-		logger:  logger,
+		cfg:      cfg,
+		stopping: make(chan struct{}),
+		cfgPath:  cfgPath,
+		st:       st,
+		judger:   judge.New(tc, judge.NewRunner(), filepath.Join(st.DataDir(), "work")),
+		baseDir:  baseDir,
+		logger:   logger,
 	}
 	// Normalising here means a hand-edited config.json with a bad standard
 	// degrades to the default instead of breaking every compile.
@@ -201,7 +217,9 @@ func (s *Server) routes() {
 	mux.HandleFunc("GET /api/teacher/exams/{id}/submissions", s.admin(s.handleExamSubmissions))
 	mux.HandleFunc("GET /api/teacher/exams/{id}/scores", s.admin(s.handleExamScores))
 	mux.HandleFunc("GET /api/teacher/exams/{id}/scores.csv", s.admin(s.handleExamScoresCSV))
+	mux.HandleFunc("PUT /api/teacher/exams/{id}/policy", s.admin(s.handleSetExamPolicy))
 	mux.HandleFunc("GET /api/teacher/exams/{id}/events", s.admin(s.handleExamEvents))
+	mux.HandleFunc("GET /api/teacher/exams/{id}/stream", s.admin(s.handleExamStream))
 	mux.HandleFunc("GET /api/teacher/exams/{id}/reconcile", s.admin(s.handleReconcile))
 	mux.HandleFunc("GET /api/teacher/exams/{id}/code.zip", s.admin(s.handleExportCode))
 	mux.HandleFunc("POST /api/teacher/sessions/{id}/promote", s.admin(s.handlePromoteSnapshot))
@@ -292,6 +310,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	}
 }
 
+// jsonLine marshals a value onto one line, for an SSE data: frame. A newline
+// inside the payload would terminate the frame early.
+func jsonLine(v any) (string, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
 func writeError(w http.ResponseWriter, status int, code, detail string) {
 	writeJSON(w, status, protocol.ErrorResponse{Error: code, Detail: detail})
 }
@@ -367,6 +395,7 @@ func (s *Server) Run(ctx context.Context) error {
 		go s.judgeWorker(ctx, fmt.Sprintf("worker-%d", i+1))
 	}
 	go s.serveDiscovery(ctx)
+	go s.sweepOfflineSessions(ctx)
 
 	srv := &http.Server{
 		Addr:              s.cfg.Addr,
@@ -375,6 +404,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	go func() {
 		<-ctx.Done()
+		close(s.stopping)
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutCtx)

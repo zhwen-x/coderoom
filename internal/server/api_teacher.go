@@ -30,6 +30,10 @@ type systemInfo struct {
 	Options       judge.Options   `json:"options"`
 	Sandbox       string          `json:"sandbox"`
 	Warnings      []string        `json:"warnings"`
+	// DefaultPolicy is served so the console's "restore defaults" button does
+	// not need its own copy of the defaults. One definition, in Go, means the
+	// button can never restore something the server would not have chosen.
+	DefaultPolicy map[string]protocol.Policy `json:"default_policy"`
 }
 
 func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
@@ -60,6 +64,10 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 		Options:       s.judger.Options(),
 		Sandbox:       judge.SandboxDescription(),
 		Warnings:      warnings,
+		DefaultPolicy: map[string]protocol.Policy{
+			protocol.ExamTypeExam:     protocol.DefaultPolicyFor(protocol.ExamTypeExam),
+			protocol.ExamTypePractice: protocol.DefaultPolicyFor(protocol.ExamTypePractice),
+		},
 	})
 }
 
@@ -439,41 +447,6 @@ func (s *Server) handleReleaseResults(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "show": body.Show})
 }
 
-// sessionView adds derived invigilation state the dashboard needs.
-type sessionView struct {
-	*store.Session
-	Online      bool  `json:"online"`
-	SilentForMS int64 `json:"silent_for_ms"`
-}
-
-// A client that has not been heard from for this long is treated as gone -
-// the only way to detect a student who killed the client process.
-const heartbeatGraceMS = 45_000
-
-func (s *Server) handleExamSessions(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "id")
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "bad_id", "考试 ID 无效")
-		return
-	}
-	list, err := s.st.ListSessions(r.Context(), id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "db_error", err.Error())
-		return
-	}
-	now := store.NowMS()
-	out := []sessionView{}
-	for _, x := range list {
-		silent := now - x.LastHeartbeatAt
-		out = append(out, sessionView{
-			Session:     x,
-			Online:      silent <= heartbeatGraceMS,
-			SilentForMS: silent,
-		})
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
 func (s *Server) handleExamSubmissions(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r, "id")
 	if err != nil {
@@ -666,22 +639,6 @@ func (s *Server) handleExamScoresCSV(w http.ResponseWriter, r *http.Request) {
 		rec = append(rec, strconv.Itoa(row.Total))
 		_ = cw.Write(rec)
 	}
-}
-
-func (s *Server) handleExamEvents(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "id")
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "bad_id", "考试 ID 无效")
-		return
-	}
-	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	rows, err := s.st.ListEvents(r.Context(), id, since, limit)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "db_error", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, rows)
 }
 
 // -------------------------------------------------------------- submissions

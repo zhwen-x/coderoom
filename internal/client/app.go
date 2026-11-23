@@ -49,7 +49,9 @@ type App struct {
 	lastError      string
 	handedIn       bool
 	focused        bool
+	foreground     string // live foreground app, from the OS monitor
 
+	mon *monitor
 	mux *http.ServeMux
 }
 
@@ -72,8 +74,49 @@ func NewApp(dataDir string, discoveryPort int, logger *log.Logger) (*App, error)
 	if addr := local.State().ServerAddr; addr != "" {
 		a.up = NewUpstream(addr)
 	}
+	a.mon = newMonitor(monitorDeps{
+		probe: newSysProbe(),
+		// Monitoring is scoped to a logged-in session. Before login there is
+		// no student to attribute an event to, and no policy that a teacher
+		// chose - so the monitor is handed an empty policy and does nothing.
+		policy: func() protocol.Policy {
+			a.mu.RLock()
+			defer a.mu.RUnlock()
+			if !a.loggedIn {
+				return protocol.Policy{}
+			}
+			return a.policy
+		},
+		emit:          local.QueueEvent,
+		setForeground: a.noteForeground,
+		serverHost: func() string {
+			a.mu.RLock()
+			defer a.mu.RUnlock()
+			if a.up == nil {
+				return ""
+			}
+			return a.up.Addr()
+		},
+		logf: logger.Printf,
+	})
 	a.routes()
 	return a, nil
+}
+
+func (a *App) noteForeground(name string) {
+	a.mu.Lock()
+	a.foreground = name
+	a.mu.Unlock()
+}
+
+// osForegroundActive reports whether the OS-level foreground monitor is doing
+// the watching. When it is, the browser's own blur event is redundant and
+// strictly less informative - it knows focus was lost but not to what - so the
+// UI stops reporting and the timeline holds one event per switch, not two.
+func (a *App) osForegroundActive() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.policy.MonitorForeground && a.mon != nil && a.mon.canWatchForeground()
 }
 
 // ServerTime is the only clock the UI is allowed to use for the countdown.
@@ -182,6 +225,10 @@ type uiState struct {
 	LastError      string                      `json:"last_error"`
 	HandedIn       bool                        `json:"handed_in"`
 	Policy         protocol.Policy             `json:"policy"`
+	// Monitors is the plain-language list of checks in force, shown to the
+	// student. A monitored exam says so: visible rules produce fewer disputes
+	// afterwards, and a hidden check deters nobody.
+	Monitors []string `json:"monitors"`
 }
 
 func (a *App) snapshotUI() uiState {
@@ -218,6 +265,10 @@ func (a *App) snapshotUI() uiState {
 		LastError:      a.lastError,
 		HandedIn:       a.handedIn,
 		Policy:         a.policy,
+		Monitors:       []string{},
+	}
+	if a.loggedIn {
+		st.Monitors = activeMonitors(a.policy)
 	}
 	if a.up != nil {
 		st.ServerAddr = a.up.Addr()
@@ -537,8 +588,9 @@ func (a *App) hFocus(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 
 	// Losing focus means another window came forward. Reported only when the
-	// policy asks for it, and only on the transition.
-	if monitor && was && !body.Focused {
+	// policy asks for it, only on the transition, and only when the OS-level
+	// monitor is not already covering this with better detail.
+	if monitor && was && !body.Focused && !a.osForegroundActive() {
 		a.local.QueueEvent(protocol.Event{
 			Type:       protocol.EvForegroundLost,
 			Severity:   protocol.SevWarn,
@@ -576,6 +628,10 @@ func (a *App) hExport(w http.ResponseWriter, r *http.Request) {
 // times keeps the policy's intervals adjustable at runtime without restarting
 // goroutines.
 func (a *App) Run(ctx context.Context) {
+	// The behaviour monitor gets its own goroutine: its checks poll the OS and
+	// must not be able to delay a heartbeat or a snapshot upload by blocking.
+	go a.mon.Run(ctx)
+
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
@@ -639,7 +695,7 @@ func (a *App) shutdownFlush() {
 
 func (a *App) heartbeat(ctx context.Context) {
 	a.mu.RLock()
-	up, pv := a.up, a.policy.Version
+	up, pv, fg := a.up, a.policy.Version, a.foreground
 	a.mu.RUnlock()
 	if up == nil {
 		return
@@ -648,6 +704,7 @@ func (a *App) heartbeat(ctx context.Context) {
 		ClientTime:    time.Now().UnixMilli(),
 		Focused:       a.isFocused(),
 		PolicyVersion: pv,
+		Foreground:    fg,
 	})
 	if err != nil {
 		a.noteError(err)

@@ -370,7 +370,7 @@ func TestEventsAreRecordedWithBothClocks(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := s.ListEvents(ctx, examID, 0, 10)
+	rows, err := s.QueryEvents(ctx, EventQuery{ExamID: examID, Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}

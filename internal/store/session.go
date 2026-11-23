@@ -95,6 +95,11 @@ type Session struct {
 	LoginAt         int64  `json:"login_at"`
 	LastHeartbeatAt int64  `json:"last_heartbeat_at"`
 	SubmittedAt     *int64 `json:"submitted_at"`
+	// Focused and Foreground are the client's last report of what the student
+	// is looking at. Events say when a switch happened; these say what is true
+	// now, which is the question an invigilator walking the room is asking.
+	Focused    bool   `json:"focused"`
+	Foreground string `json:"foreground"`
 }
 
 func newToken() (string, error) {
@@ -180,16 +185,29 @@ func (s *Store) Login(ctx context.Context, sess *Session) (*LoginResult, error) 
 }
 
 const sessionCols = `id, exam_id, student_no, name, class, machine_name, ip, mac, os,
-	client_version, token, paper_id, login_at, last_heartbeat_at, submitted_at`
+	client_version, token, paper_id, login_at, last_heartbeat_at, submitted_at,
+	focused, foreground`
+
+// sessionColsPrefixed is the same list qualified for a query that joins, where
+// a bare column name would be ambiguous.
+var sessionColsPrefixed = func() string {
+	parts := strings.Split(sessionCols, ",")
+	for i, p := range parts {
+		parts[i] = "s." + strings.TrimSpace(p)
+	}
+	return strings.Join(parts, ", ")
+}()
 
 func scanSession(sc interface{ Scan(...any) error }) (*Session, error) {
 	var x Session
+	var focused int
 	err := sc.Scan(&x.ID, &x.ExamID, &x.StudentNo, &x.Name, &x.Class, &x.MachineName,
 		&x.IP, &x.MAC, &x.OS, &x.ClientVersion, &x.Token, &x.PaperID,
-		&x.LoginAt, &x.LastHeartbeatAt, &x.SubmittedAt)
+		&x.LoginAt, &x.LastHeartbeatAt, &x.SubmittedAt, &focused, &x.Foreground)
 	if err != nil {
 		return nil, err
 	}
+	x.Focused = focused != 0
 	return &x, nil
 }
 
@@ -227,10 +245,78 @@ func (s *Store) ListSessions(ctx context.Context, examID int64) ([]*Session, err
 
 // Heartbeat records liveness. The server detects a killed client by the
 // absence of these, since a killed client cannot report its own death.
+//
+// Clearing offline_alerted here is what makes the lost-heartbeat alert
+// episodic: a student whose machine comes back is eligible to be reported
+// again if it goes away a second time.
 func (s *Store) Heartbeat(ctx context.Context, sessionID int64) error {
 	_, err := s.exec(ctx,
-		`UPDATE sessions SET last_heartbeat_at=? WHERE id=?`, NowMS(), sessionID)
+		`UPDATE sessions SET last_heartbeat_at=?, offline_alerted=0 WHERE id=?`,
+		NowMS(), sessionID)
 	return err
+}
+
+// RecordClientState is the heartbeat plus what the client reported about the
+// student's screen.
+func (s *Store) RecordClientState(ctx context.Context, sessionID int64,
+	focused bool, foreground string) error {
+	_, err := s.exec(ctx, `
+		UPDATE sessions SET last_heartbeat_at=?, offline_alerted=0,
+		  focused=?, foreground=? WHERE id=?`,
+		NowMS(), b2i(focused), foreground, sessionID)
+	return err
+}
+
+// ClaimSilentSessions returns the sessions whose last heartbeat predates
+// cutoff and marks them as alerted, in one transaction, so a caller can log
+// exactly one event per episode even with several sweeps overlapping.
+//
+// The cutoff is passed in rather than derived from a grace period here: how
+// long silence has to last before it means something is the server's policy,
+// and keeping the clock out of this method is also what lets a test age a
+// session without waiting for one.
+//
+// Scope is deliberately narrow. Only a running exam qualifies: during practice
+// a student closing the client is just leaving, and after an exam ends every
+// client in the room disconnects at once - alerting on either would produce a
+// wall of events that means nothing. A student who has handed in is excluded
+// for the same reason.
+func (s *Store) ClaimSilentSessions(ctx context.Context, cutoff int64) ([]*Session, error) {
+	var out []*Session
+	err := s.write(ctx, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+			SELECT `+sessionColsPrefixed+` FROM sessions s
+			  JOIN exams e ON e.id = s.exam_id
+			WHERE s.offline_alerted = 0
+			  AND s.submitted_at IS NULL
+			  AND s.last_heartbeat_at < ?
+			  AND e.type = 'exam' AND e.state = 'running'`, cutoff)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			x, err := scanSession(rows)
+			if err != nil {
+				return err
+			}
+			out = append(out, x)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, x := range out {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE sessions SET offline_alerted=1 WHERE id=?`, x.ID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // MarkSubmitted stamps the moment a student finished (hand-in confirmed).

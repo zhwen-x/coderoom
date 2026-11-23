@@ -124,6 +124,13 @@ CREATE TABLE IF NOT EXISTS sessions (
   login_at          INTEGER NOT NULL,
   last_heartbeat_at INTEGER NOT NULL,
   submitted_at      INTEGER,
+  -- M3 invigilation: the client's last reported focus state and foreground
+  -- app, so the dashboard can show the present rather than replaying events.
+  focused           INTEGER NOT NULL DEFAULT 1,
+  foreground        TEXT NOT NULL DEFAULT '',
+  -- Latch so a lost heartbeat is reported once per episode, not once per
+  -- sweep. Cleared by the next heartbeat that arrives.
+  offline_alerted   INTEGER NOT NULL DEFAULT 0,
   UNIQUE(exam_id, student_no)
 );
 

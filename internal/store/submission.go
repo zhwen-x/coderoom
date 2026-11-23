@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"coderoom/internal/protocol"
 )
@@ -520,14 +521,50 @@ type EventRow struct {
 	ServerTime int64          `json:"server_time"`
 }
 
-func (s *Store) ListEvents(ctx context.Context, examID int64, sinceID int64, limit int) ([]EventRow, error) {
-	if limit <= 0 {
-		limit = 200
+// EventQuery narrows an event listing.
+//
+// Ascending exists because the dashboard asks two different questions of the
+// same table. Opening the monitor view wants the newest page ("what has
+// happened"), so it reads descending and stops at the limit. The live stream
+// wants everything after a cursor, oldest first, so that a burst larger than
+// one page is delivered in order instead of having its oldest rows silently
+// dropped off the end of a descending limit.
+type EventQuery struct {
+	ExamID     int64
+	StudentNo  string   // empty: every student in the exam
+	AfterID    int64    // exclusive lower bound on id
+	Severities []string // empty: every severity
+	Limit      int
+	Ascending  bool
+}
+
+func (s *Store) QueryEvents(ctx context.Context, q EventQuery) ([]EventRow, error) {
+	if q.Limit <= 0 {
+		q.Limit = 200
 	}
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, student_no, type, severity, payload_json, client_time, server_time
-		FROM events WHERE exam_id=? AND id>? ORDER BY id DESC LIMIT ?`,
-		examID, sinceID, limit)
+	sb := strings.Builder{}
+	sb.WriteString(`SELECT id, student_no, type, severity, payload_json,
+		client_time, server_time FROM events WHERE exam_id=? AND id>?`)
+	args := []any{q.ExamID, q.AfterID}
+	if q.StudentNo != "" {
+		sb.WriteString(" AND student_no=?")
+		args = append(args, q.StudentNo)
+	}
+	if len(q.Severities) > 0 {
+		sb.WriteString(" AND severity IN (" +
+			strings.TrimSuffix(strings.Repeat("?,", len(q.Severities)), ",") + ")")
+		for _, sev := range q.Severities {
+			args = append(args, sev)
+		}
+	}
+	if q.Ascending {
+		sb.WriteString(" ORDER BY id ASC LIMIT ?")
+	} else {
+		sb.WriteString(" ORDER BY id DESC LIMIT ?")
+	}
+	args = append(args, q.Limit)
+
+	rows, err := s.db.QueryContext(ctx, sb.String(), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -545,6 +582,41 @@ func (s *Store) ListEvents(ctx context.Context, examID int64, sinceID int64, lim
 			_ = json.Unmarshal([]byte(payload), &x.Payload)
 		}
 		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+// EventTally is the per-student event count the dashboard shows beside a name,
+// so a teacher scanning fifty rows sees who to look at without opening anyone.
+type EventTally struct {
+	Warn  int `json:"warn"`
+	Alert int `json:"alert"`
+}
+
+func (s *Store) EventCountsByStudent(ctx context.Context, examID int64) (map[string]EventTally, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT student_no, severity, COUNT(*) FROM events
+		WHERE exam_id=? AND severity IN ('warn','alert')
+		GROUP BY student_no, severity`, examID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := map[string]EventTally{}
+	for rows.Next() {
+		var no, sev string
+		var n int
+		if err := rows.Scan(&no, &sev, &n); err != nil {
+			return nil, err
+		}
+		t := out[no]
+		if sev == protocol.SevAlert {
+			t.Alert = n
+		} else {
+			t.Warn = n
+		}
+		out[no] = t
 	}
 	return out, rows.Err()
 }

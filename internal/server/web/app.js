@@ -12,6 +12,9 @@ const S = {
   problems: [],
   lastEventId: 0,
   timer: null,
+  system: null,     // /system payload, incl. the server's policy defaults
+  stream: null,     // EventSource for the invigilation feed
+  focusStudent: '', // drilled-down student in the monitor view
 };
 
 // ------------------------------------------------------------------- utils
@@ -134,6 +137,9 @@ function bootGate() {
 async function start() {
   $('#gate').hidden = true;
   $('#app').hidden = false;
+  // The policy defaults come from the server, so "restore defaults" restores
+  // what the server would actually have chosen rather than a copy that drifts.
+  try { S.system = await api('/system'); } catch { S.system = null; }
   for (const b of document.querySelectorAll('#tabs button')) {
     b.addEventListener('click', () => switchView(b.dataset.view));
   }
@@ -148,6 +154,7 @@ function switchView(v) {
   }
   clearInterval(S.timer);
   S.timer = null;
+  closeStream();
   render();
 }
 
@@ -262,6 +269,7 @@ function examControlPanel() {
     ),
     el('p', { class: 'muted' },
       '发布后学生可登录但看不到题面；开考后才下发题面并开始倒计时。'),
+    policyRow(e),
   );
   api(`/exams/${e.id}`).then((d) => {
     if (e.per_student_paper) {
@@ -287,6 +295,108 @@ function examControlPanel() {
       ))))));
   }).catch(() => {});
   return box;
+}
+
+// ------------------------------------------------------------ monitor policy
+
+const MONITOR_FIELDS = [
+  ['monitor_usb', 'U盘/存储设备', '出现或移走一个可用的驱动器盘符时上报'],
+  ['monitor_process', '黑名单进程', '浏览器、聊天工具、远程控制软件在运行就上报'],
+  ['monitor_foreground', '前台窗口', `切到非白名单窗口并停留 20 秒以上才上报，并在看板显示当前前台程序`],
+  ['monitor_paste', '粘贴留痕', '记录每次粘贴的字符数与行数（代码靠粘贴录入，不能禁用剪贴板）'],
+  ['monitor_network', '外网连接', '枚举 TCP 连接，发现通往公网的目标就上报；噪音最大，默认关闭'],
+];
+
+function policyRow(e) {
+  const p = e.policy || {};
+  const on = MONITOR_FIELDS.filter(([k]) => p[k]).map(([, label]) => label);
+  return el('div', { class: 'row' },
+    el('strong', {}, '监控策略'),
+    on.length
+      ? el('span', {}, on.join(' · '))
+      : el('span', { class: 'muted' }, '全部关闭'),
+    el('span', { class: 'muted' }, `v${e.policy_version || 1}`),
+    el('button', { onclick: () => openPolicyEditor(e) }, '编辑'),
+  );
+}
+
+function openPolicyEditor(e) {
+  const p = JSON.parse(JSON.stringify(e.policy || {}));
+  const boxes = MONITOR_FIELDS.map(([key, label, hint]) => {
+    const cb = el('input', { type: 'checkbox' });
+    cb.checked = !!p[key];
+    cb._key = key;
+    return el('div', {},
+      el('label', { class: 'row' }, cb, el('strong', {}, label)),
+      el('div', { class: 'muted small' }, hint));
+  });
+
+  const black = el('textarea', { rows: '6' });
+  black.value = (p.process_blacklist || []).join('\n');
+  const white = el('textarea', { rows: '6' });
+  white.value = (p.process_whitelist || []).join('\n');
+  const snap = el('input', { type: 'number', value: p.snapshot_interval_sec || 30, min: '10', max: '600' });
+  const beat = el('input', { type: 'number', value: p.heartbeat_interval_sec || 10, min: '5', max: '120' });
+
+  const lines = (ta) => ta.value.split('\n').map((x) => x.trim()).filter(Boolean);
+
+  showModal(`监控策略: ${e.name}`, [
+    el('p', { class: 'muted' },
+      '保存后策略版本号 +1。学生端在下一次心跳（默认 10 秒内）自己把新策略拉下来——' +
+      '包括保存那一刻还没开机的机器，和之后才重启的机器。不需要逐台操作。'),
+    el('div', { class: 'grid2' }, boxes),
+    el('hr'),
+    el('div', { class: 'grid2' },
+      el('label', {}, '黑名单进程（每行一个，可省略 .exe）', black),
+      el('label', {}, '白名单进程（每行一个，不上报；黑白名单冲突时白名单优先）', white)),
+    el('p', { class: 'muted small' },
+      '白名单默认含极域电子教室与机房 IDE：学生本来就该待在 IDE 里，' +
+      '把它当异常会把真正的告警淹掉。'),
+    el('div', { class: 'grid2' },
+      el('label', {}, '代码快照间隔（秒）', snap),
+      el('label', {}, '心跳间隔（秒）', beat)),
+    el('p', { class: 'warn small' },
+      '本版本只检测、不拦截。禁用 U 盘与断网需要管理员权限和一套能在客户端崩溃后' +
+      '恢复系统设置的看门狗，属于 M4，所以这里不提供对应开关——' +
+      '给出一个点了却不生效的开关比没有这个开关更糟。'),
+  ], [
+    el('button', { onclick: closeModal }, '取消'),
+    el('button', {
+      onclick: () => {
+        const d = ((S.system || {}).default_policy || {})[e.type] || {};
+        boxes.forEach((b) => {
+          const cb = b.querySelector('input');
+          cb.checked = !!d[cb._key];
+        });
+        black.value = (d.process_blacklist || []).join('\n');
+        white.value = (d.process_whitelist || []).join('\n');
+      },
+    }, '恢复默认'),
+    el('button', {
+      class: 'primary',
+      onclick: async () => {
+        const body = {
+          snapshot_interval_sec: Number(snap.value),
+          heartbeat_interval_sec: Number(beat.value),
+          process_blacklist: lines(black),
+          process_whitelist: lines(white),
+        };
+        boxes.forEach((b) => {
+          const cb = b.querySelector('input');
+          body[cb._key] = cb.checked;
+        });
+        try {
+          const saved = await api(`/exams/${e.id}/policy`, {
+            method: 'PUT', body: JSON.stringify(body),
+          });
+          closeModal();
+          await refreshExams();
+          render();
+          toast(`策略已保存（v${saved.version}），学生端将在下次心跳时自动应用`);
+        } catch (err) { toast(err.message, true); }
+      },
+    }, '保存'),
+  ]);
 }
 
 async function openExamEditor() {
@@ -572,56 +682,241 @@ async function openTestcaseEditor(id, title) {
 
 // ------------------------------------------------------------- monitor view
 
+function closeStream() {
+  if (S.stream) { S.stream.close(); S.stream = null; }
+}
+
+const EVENT_LABEL = {
+  usb_inserted: '插入存储设备', usb_removed: '移除存储设备',
+  process_blacklisted: '运行黑名单程序', foreground_lost: '切出本窗口',
+  paste_large: '大段粘贴', paste: '粘贴',
+  external_network: '连接外网', clock_skew: '本机时间异常',
+  login_conflict: '同学号异机登录', heartbeat_lost: '客户端失联',
+  client_started: '客户端启动', client_exiting: '客户端退出',
+  monitor_degraded: '监控项不可用',
+};
+const DRIVE_KIND = {
+  removable: '可移动磁盘', cdrom: '光驱', fixed: '固定磁盘',
+  remote: '网络驱动器', ramdisk: '内存盘', unknown: '未知',
+};
+const SEV_CLASS = { alert: 'err', warn: 'warn', info: 'muted' };
+const secs = (ms) => `${Math.round((ms || 0) / 1000)} 秒`;
+
+// Events are rendered as sentences, not as JSON. A dashboard is read while
+// walking around a room: "F: 可移动磁盘" is actionable at a glance and
+// {"drive":"F:","kind":"removable"} is not.
+function describeEvent(ev) {
+  const p = ev.payload || {};
+  switch (ev.type) {
+    case 'usb_inserted':
+    case 'usb_removed':
+      return `${p.drive || '?'} ${DRIVE_KIND[p.kind] || p.kind || ''}`;
+    case 'process_blacklisted':
+      return `${p.process || '?'}${p.pid ? ` (PID ${p.pid})` : ''}`;
+    case 'foreground_lost':
+      if (!p.process) return '本窗口失去焦点';
+      return `${p.process}${p.title ? ` — ${p.title}` : ''}` +
+        `${p.dwell_ms ? `，停留 ${secs(p.dwell_ms)}` : ''}`;
+    case 'paste':
+    case 'paste_large':
+      return `${p.chars || 0} 字符 / ${p.lines || 0} 行`;
+    case 'external_network':
+      return `${p.process || '?'} → ${p.remote || '?'}`;
+    case 'clock_skew':
+      return `与服务端相差 ${secs(p.skew_ms)}`;
+    case 'login_conflict':
+      return `原机器 ${p.previous_machine || '?'} → 现机器 ${p.current_machine || '?'}`;
+    case 'heartbeat_lost':
+      return `已失联 ${secs(p.silent_ms)}${p.machine ? `，机器 ${p.machine}` : ''}`;
+    case 'monitor_degraded':
+      return `${p.check || '?'}：${p.reason || '不可用'}`;
+    case 'client_started':
+      return `机器 ${p.machine || '?'}${p.ip ? ` (${p.ip})` : ''}`;
+    case 'client_exiting':
+      return '学生正常关闭了客户端';
+    default: {
+      const keys = Object.keys(p);
+      return keys.length ? JSON.stringify(p) : '';
+    }
+  }
+}
+
+function eventRow(ev) {
+  return el('tr', { class: ev.severity === 'alert' ? 'row-alert' : null },
+    el('td', {}, fmtTime(ev.server_time)),
+    el('td', {},
+      el('a', {
+        class: 'link',
+        title: '只看这名学生',
+        onclick: () => { S.focusStudent = ev.student_no; render(); },
+      }, ev.student_no || '-')),
+    el('td', {}, EVENT_LABEL[ev.type] || ev.type),
+    el('td', {}, el('span', { class: SEV_CLASS[ev.severity] || 'muted' },
+      ev.severity === 'alert' ? '告警' : ev.severity === 'warn' ? '注意' : '信息')),
+    el('td', {}, describeEvent(ev)));
+}
+
 function viewMonitor() {
   if (!S.examId) return setMain(el('div', { class: 'empty' }, '请先在「考试/练习」中选择一场。'));
+
   const sessionsBox = el('div', { class: 'panel' }, el('h2', {}, '在线学生'));
-  const eventsBox = el('div', { class: 'panel' }, el('h2', {}, '异常行为事件'));
+  const eventsBox = el('div', { class: 'panel' }, el('h2', {}, '行为事件'));
+  const feedState = el('span', { class: 'muted' }, '连接中…');
   setMain(sessionsBox, eventsBox);
 
-  const tick = async () => {
-    if (S.view !== 'monitor') return;
+  // The event table is append-only in the UI: the stream delivers only rows
+  // newer than the cursor, and they are prepended. Nothing the teacher is
+  // currently reading gets rebuilt under their cursor, which is the reason
+  // this view is a stream rather than a poll.
+  const tbody = el('tbody', {});
+  const shown = new Set();
+  let total = 0;
+
+  const addEvents = (rows, { prepend }) => {
+    const fresh = rows.filter((ev) => !shown.has(ev.id));
+    if (!fresh.length) return;
+    fresh.forEach((ev) => shown.add(ev.id));
+    total += fresh.length;
+    const nodes = fresh.map(eventRow);
+    if (prepend) tbody.prepend(...nodes.reverse());
+    else tbody.append(...nodes);
+    // Bound the DOM: an exam can run for hours and nobody scrolls past a
+    // few hundred rows.
+    while (tbody.children.length > 500) tbody.lastChild.remove();
+    renderEventsHeader();
+  };
+
+  const renderEventsHeader = () => {
+    const title = S.focusStudent ? `行为事件 · 仅 ${S.focusStudent}` : '行为事件';
+    setKids(header,
+      el('h2', {}, title),
+      el('span', { class: 'muted' }, `${total} 条`),
+      feedState,
+      S.focusStudent
+        ? el('button', { onclick: () => { S.focusStudent = ''; render(); } }, '看全部')
+        : null);
+  };
+  const header = el('div', { class: 'row' });
+
+  eventsBox.replaceChildren(header,
+    el('div', { class: 'scroll tall' }, el('table', {},
+      el('thead', {}, el('tr', {},
+        ...['时间', '学号', '类型', '级别', '详情'].map((h) => el('th', {}, h)))),
+      tbody)));
+  renderEventsHeader();
+
+  const renderSessions = (sessions) => {
+    const online = sessions.filter((x) => x.online).length;
+    const alerts = sessions.filter((x) => (x.events || {}).alert > 0).length;
+    setKids(sessionsBox,
+      el('div', { class: 'row' },
+        el('h2', {}, '在线学生'),
+        el('span', { class: 'muted' }, `${online} / ${sessions.length} 在线`),
+        alerts ? el('span', { class: 'err' }, `${alerts} 人有告警`) : null),
+      sessions.length ? el('div', { class: 'scroll' }, el('table', {},
+        el('thead', {}, el('tr', {},
+          ...['', '学号', '姓名', '班级', '机器', '当前前台', '事件', '最后心跳', '交卷']
+            .map((h) => el('th', {}, h)))),
+        el('tbody', {}, sessions.map((x) => el('tr', {
+          class: S.focusStudent === x.student_no ? 'row-sel' : null,
+          onclick: () => {
+            S.focusStudent = S.focusStudent === x.student_no ? '' : x.student_no;
+            render();
+          },
+          title: '点击只看这名学生的事件',
+        },
+          el('td', {}, el('span', {
+            class: `dot ${x.online ? 'on' : 'off'}`,
+            title: x.online ? '在线' : `失联 ${fmtDur(x.silent_for_ms)}`,
+          })),
+          el('td', {}, x.student_no), el('td', {}, x.name), el('td', {}, x.class || '-'),
+          el('td', {}, x.machine_name || '-'),
+          el('td', {}, foregroundCell(x)),
+          el('td', {}, tallyCell(x.events)),
+          el('td', {}, x.online ? '正常'
+            : el('span', { class: 'warn' }, `失联 ${fmtDur(x.silent_for_ms)}`)),
+          el('td', {}, x.submitted_at ? fmtTime(x.submitted_at) : '-'),
+        )))))
+        : el('div', { class: 'empty' }, '还没有学生登录。'));
+  };
+
+  // Initial page, then the stream takes over from that cursor. Doing it in
+  // this order means no gap: anything logged between the two is delivered by
+  // the stream, because the cursor is the id of the newest row already shown.
+  (async () => {
     try {
       const [sessions, events] = await Promise.all([
         api(`/exams/${S.examId}/sessions`),
-        api(`/exams/${S.examId}/events?limit=100`),
+        api(`/exams/${S.examId}/events?limit=200` +
+          (S.focusStudent ? `&student=${encodeURIComponent(S.focusStudent)}` : '')),
       ]);
-      const online = sessions.filter((x) => x.online).length;
-      sessionsBox.replaceChildren(
-        el('div', { class: 'row' },
-          el('h2', {}, '在线学生'),
-          el('span', { class: 'muted' }, `${online} / ${sessions.length} 在线`)),
-        sessions.length ? el('div', { class: 'scroll' }, el('table', {},
-          el('thead', {}, el('tr', {},
-            ...['', '学号', '姓名', '班级', '机器', 'IP', '最后心跳', '交卷'].map((h) => el('th', {}, h)))),
-          el('tbody', {}, sessions.map((x) => el('tr', {},
-            el('td', {}, el('span', { class: `dot ${x.online ? 'on' : 'off'}`,
-              title: x.online ? '在线' : `失联 ${fmtDur(x.silent_for_ms)}` })),
-            el('td', {}, x.student_no), el('td', {}, x.name), el('td', {}, x.class || '-'),
-            el('td', {}, x.machine_name || '-'), el('td', {}, x.ip || '-'),
-            el('td', {}, x.online ? '正常' : el('span', { class: 'warn' }, `失联 ${fmtDur(x.silent_for_ms)}`)),
-            el('td', {}, x.submitted_at ? fmtTime(x.submitted_at) : '-'),
-          )))))
-          : el('div', { class: 'empty' }, '还没有学生登录。'));
-
-      eventsBox.replaceChildren(
-        el('div', { class: 'row' }, el('h2', {}, '异常行为事件'),
-          el('span', { class: 'muted' }, `共 ${events.length} 条（最新在前）`)),
-        events.length ? el('div', { class: 'scroll' }, el('table', {},
-          el('thead', {}, el('tr', {},
-            ...['时间', '学号', '类型', '级别', '详情'].map((h) => el('th', {}, h)))),
-          el('tbody', {}, events.map((v) => el('tr', {},
-            el('td', {}, fmtTime(v.server_time)), el('td', {}, v.student_no || '-'),
-            el('td', {}, v.type),
-            el('td', {}, el('span', {
-              class: v.severity === 'alert' ? 'err' : v.severity === 'warn' ? 'warn' : 'muted',
-            }, v.severity)),
-            el('td', {}, JSON.stringify(v.payload || {})),
-          )))))
-          : el('div', { class: 'empty' }, '暂无事件。行为监控将在 M3 阶段接入更多检测项。'));
+      renderSessions(sessions);
+      addEvents(events, { prepend: false }); // already newest-first
+      const cursor = events.length ? Math.max(...events.map((e) => e.id)) : 0;
+      openStream(cursor, renderSessions, addEvents, feedState);
     } catch (e) { toast(e.message, true); }
-  };
-  tick();
-  S.timer = setInterval(tick, 5000);
+  })();
+}
+
+function foregroundCell(x) {
+  // For a student who has gone silent this is the last thing seen rather than
+  // the current one, so it is shown muted with the tense spelled out - the
+  // 最后心跳 column next to it says how stale.
+  if (!x.online) {
+    return x.foreground
+      ? el('span', { class: 'muted', title: '失联前最后所在窗口' }, `${x.foreground}（失联前）`)
+      : el('span', { class: 'muted' }, '-');
+  }
+  // Our own window is the one place the student is meant to be, so it reads
+  // as a state rather than as a process name nobody needs to parse.
+  if (!x.foreground || /^coderoom-client/i.test(x.foreground)) {
+    return el('span', { class: 'muted' }, x.focused ? '本窗口' : '未知');
+  }
+  return el('span', { class: x.focused ? 'muted' : 'warn' }, x.foreground);
+}
+
+function tallyCell(t) {
+  const tally = t || {};
+  if (!tally.alert && !tally.warn) return el('span', { class: 'muted' }, '-');
+  return el('span', {},
+    tally.alert ? el('span', { class: 'err' }, `告警 ${tally.alert}`) : null,
+    tally.alert && tally.warn ? ' · ' : null,
+    tally.warn ? el('span', { class: 'warn' }, `注意 ${tally.warn}` ) : null);
+}
+
+// openStream subscribes to the server's SSE feed. EventSource cannot set a
+// request header, so the admin token rides in the query string - the same way
+// the console's own URL carries it.
+function openStream(cursor, renderSessions, addEvents, feedState) {
+  closeStream();
+  const url = `/api/teacher/exams/${S.examId}/stream` +
+    `?since=${cursor}&t=${encodeURIComponent(S.token)}`;
+  const es = new EventSource(url);
+  S.stream = es;
+
+  es.addEventListener('open', () => { feedState.textContent = '实时'; feedState.className = 'ok'; });
+  es.addEventListener('sessions', (m) => {
+    if (S.view !== 'monitor') return;
+    try { renderSessions(JSON.parse(m.data)); } catch { /* malformed frame */ }
+  });
+  es.addEventListener('events', (m) => {
+    if (S.view !== 'monitor') return;
+    try {
+      let rows = JSON.parse(m.data);
+      if (S.focusStudent) rows = rows.filter((e) => e.student_no === S.focusStudent);
+      addEvents(rows, { prepend: true });
+      const fresh = rows.filter((e) => e.severity === 'alert');
+      if (fresh.length) {
+        toast(`${fresh[0].student_no} ${EVENT_LABEL[fresh[0].type] || fresh[0].type}`, true);
+      }
+    } catch { /* malformed frame */ }
+  });
+  // The browser reconnects on its own; all this has to do is stop claiming to
+  // be live, so a dead feed is never mistaken for a quiet room.
+  es.addEventListener('error', () => {
+    feedState.textContent = '连接中断，正在重连…';
+    feedState.className = 'warn';
+  });
 }
 
 // ---------------------------------------------------------- submission view

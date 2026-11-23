@@ -117,7 +117,7 @@ func (e *Exam) normalize() {
 		e.State = protocol.ExamStateDraft
 	}
 	if e.Policy.Version == 0 {
-		e.Policy = protocol.DefaultPolicy()
+		e.Policy = protocol.DefaultPolicyFor(e.Type)
 	}
 	if e.PolicyVersion <= 0 {
 		e.PolicyVersion = 1
@@ -286,12 +286,19 @@ func scanExam(sc interface{ Scan(...any) error }) (*Exam, error) {
 	e.RosterRequired = roster != 0
 	e.ShowResults = show != 0
 	e.AllowRejudge = rejudge != 0
+	// Whether a policy was stored is decided by the column being populated,
+	// never by a field inside it. Keying off Policy.Version would conflate "no
+	// policy saved" with "a policy that happens to carry no version", and a
+	// teacher who saved an all-off policy would silently get the defaults back.
 	if policyJSON != "" && policyJSON != "{}" {
 		_ = json.Unmarshal([]byte(policyJSON), &e.Policy)
+	} else {
+		// Predates policy storage: the default for its type, not a zero value,
+		// which would read as "every check deliberately switched off".
+		e.Policy = protocol.DefaultPolicyFor(e.Type)
 	}
-	if e.Policy.Version == 0 {
-		e.Policy = protocol.DefaultPolicy()
-	}
+	// policy_version is the authority; the copy inside the JSON is only there
+	// so a client that reads the blob directly sees a consistent value.
 	e.Policy.Version = e.PolicyVersion
 	return &e, nil
 }
@@ -331,6 +338,44 @@ func (s *Store) queryExams(ctx context.Context, query string, args ...any) ([]*E
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// SetExamPolicy stores a new control policy and bumps the version.
+//
+// The bump is the whole mechanism. Clients compare their own policy_version
+// against the one in every response envelope, so raising it here is what makes
+// fifty machines pull the new policy on their next heartbeat - including the
+// one that was still booting when the teacher pressed save, and the one that
+// gets rebooted an hour later. Nothing is pushed, so nothing can be missed.
+//
+// The version is bumped even when the policy is unchanged. One redundant pull
+// per client costs a few hundred bytes; a save that silently did not take
+// effect costs an exam.
+func (s *Store) SetExamPolicy(ctx context.Context, id int64, p protocol.Policy) (int, error) {
+	var version int
+	err := s.write(ctx, func(tx *sql.Tx) error {
+		row := tx.QueryRowContext(ctx, `SELECT policy_version FROM exams WHERE id=?`, id)
+		if err := row.Scan(&version); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
+		version++
+		p.Version = version
+		blob, err := json.Marshal(p)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx,
+			`UPDATE exams SET policy_json=?, policy_version=?, updated_at=? WHERE id=?`,
+			string(blob), version, NowMS(), id)
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return version, nil
 }
 
 // SetExamState advances the lifecycle. start_at is stamped on the transition

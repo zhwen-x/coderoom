@@ -107,6 +107,13 @@ var addedColumns = []addedColumn{
 	// student wrote code but never pressed submit. Records which snapshot it
 	// came from so the gradebook can show it was not a normal hand-in.
 	{"submissions", "promoted_from", "INTEGER"},
+
+	// M3: invigilation state carried on the session row. focused/foreground
+	// are the live view the dashboard shows; offline_alerted is the latch that
+	// keeps one lost-heartbeat episode from alerting on every sweep.
+	{"sessions", "focused", "INTEGER NOT NULL DEFAULT 1"},
+	{"sessions", "foreground", "TEXT NOT NULL DEFAULT ''"},
+	{"sessions", "offline_alerted", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 func (s *Store) addColumns() error {

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -154,6 +155,13 @@ func (s *Server) handleClientLogin(w http.ResponseWriter, r *http.Request) {
 // checkClockSkew records a client whose clock disagrees with the server. The
 // countdown always uses server time, so skew is not a correctness problem -
 // but a deliberately altered clock is worth knowing about.
+//
+// This runs on every heartbeat, which is six times a minute, so what gets
+// reported is a *change*: the first time a machine is found out of step, and
+// again only if its offset later moves by more than the threshold. A clock
+// that is simply set wrong produces one event for the whole exam instead of
+// seven hundred identical ones, and an actual mid-exam clock change still
+// produces its own.
 func (s *Server) checkClockSkew(r *http.Request, sess *store.Session, clientTime int64) {
 	if clientTime == 0 {
 		return
@@ -162,19 +170,38 @@ func (s *Server) checkClockSkew(r *http.Request, sess *store.Session, clientTime
 	if skew < 0 {
 		skew = -skew
 	}
-	if skew > clockSkewAlertMS {
-		s.logEvent(r, sess, protocol.Event{
-			Type:       protocol.EvClockSkew,
-			Severity:   protocol.SevWarn,
-			ClientTime: clientTime,
-			Payload:    map[string]any{"skew_ms": skew},
-		})
+	if skew <= clockSkewAlertMS {
+		return
 	}
+	prev, _ := s.skewSeen.Load(sess.ID)
+	if last, ok := prev.(int64); ok && abs64(skew-last) <= clockSkewAlertMS {
+		return
+	}
+	s.skewSeen.Store(sess.ID, skew)
+	s.logEvent(r, sess, protocol.Event{
+		Type:       protocol.EvClockSkew,
+		Severity:   protocol.SevWarn,
+		ClientTime: clientTime,
+		Payload:    map[string]any{"skew_ms": skew},
+	})
+}
+
+func abs64(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func (s *Server) logEvent(r *http.Request, sess *store.Session, ev protocol.Event) {
+	s.logEventCtx(r.Context(), sess, ev)
+}
+
+// logEventCtx is the request-free form, for events the server raises on its
+// own initiative rather than in response to a client.
+func (s *Server) logEventCtx(ctx context.Context, sess *store.Session, ev protocol.Event) {
 	sid, eid := sess.ID, sess.ExamID
-	if err := s.st.LogEvent(r.Context(), &sid, &eid, sess.StudentNo, ev); err != nil {
+	if err := s.st.LogEvent(ctx, &sid, &eid, sess.StudentNo, ev); err != nil {
 		s.logger.Printf("log event %s: %v", ev.Type, err)
 	}
 }
@@ -428,9 +455,12 @@ func (s *Server) handleClientHeartbeat(w http.ResponseWriter, r *http.Request, s
 		writeError(w, http.StatusInternalServerError, "db_error", err.Error())
 		return
 	}
-	if err := s.st.Heartbeat(r.Context(), sess.ID); err != nil {
+	// The heartbeat carries what the student is looking at, not just that the
+	// client is alive, so the dashboard has a live view that costs no events.
+	if err := s.st.RecordClientState(r.Context(), sess.ID, req.Focused, req.Foreground); err != nil {
 		s.logger.Printf("heartbeat: %v", err)
 	}
+	s.checkClockSkew(r, sess, req.ClientTime)
 
 	resp := protocol.HeartbeatResponse{
 		Envelope:  s.envelope(exam.PolicyVersion),

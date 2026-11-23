@@ -79,6 +79,11 @@ const (
 	EvHeartbeatLost   = "heartbeat_lost" // server-side only
 	EvClientStarted   = "client_started"
 	EvClientExiting   = "client_exiting"
+
+	// EvMonitorDegraded is raised when the policy asks for a check the client
+	// cannot perform. Without it, a monitor that silently fails looks exactly
+	// like a room where nobody cheated.
+	EvMonitorDegraded = "monitor_degraded"
 )
 
 // Envelope is embedded in every client-facing response.
@@ -111,15 +116,74 @@ type Policy struct {
 	AllowedHosts    []string `json:"allowed_hosts"`
 }
 
-// DefaultPolicy is what an exam gets when the teacher has not customised it.
+// DefaultProcessBlacklist is what a new exam watches for: browsers, instant
+// messengers and remote-control tools - the three channels a student uses to
+// reach outside help. Matching is on the executable's own name, lower-cased,
+// with a trailing ".exe" optional on either side; it is never a substring
+// match, so "QQ" does not fire on QQBrowser.exe (listed separately).
+//
+// Renaming an executable defeats this list. That is accepted: M3 detects, it
+// does not enforce, and a student who renames chrome.exe still shows up in the
+// foreground monitor by window title.
+var DefaultProcessBlacklist = []string{
+	// Browsers.
+	"chrome", "msedge", "firefox", "iexplore", "opera", "brave",
+	"360se", "360chrome", "QQBrowser", "SogouExplorer", "TheWorld", "UCBrowser",
+	// Instant messengers.
+	"QQ", "TIM", "WeChat", "WeChatAppEx", "DingTalk", "Feishu", "Telegram",
+	// Remote control and screen sharing.
+	"ToDesk", "SunloginClient", "TeamViewer", "AnyDesk", "RustDesk", "mstsc",
+	"AweSun", "RayLink", "vncviewer",
+}
+
+// DefaultProcessWhitelist is never reported by the foreground or network
+// monitors, and overrides the blacklist if a name appears on both.
+//
+// Most of it is the intended workflow rather than an exception to it: students
+// write code in the lab's own IDE and paste it into CodeRoom, so the IDE being
+// in the foreground is the normal state, not an anomaly. Alerting on it would
+// bury every real signal.
+var DefaultProcessWhitelist = []string{
+	// JiYu classroom, the lab's existing control software. Its broadcast
+	// teaching mode seizes the foreground on every machine at once, which
+	// would otherwise alert for the whole room in the same second.
+	"StudentMain.exe", "TopDomain.exe",
+	// The lab's IDEs: Visual Studio, Dev-C++, PyCharm, IDLE.
+	"devenv.exe", "devcpp.exe", "pycharm64.exe", "pycharm.exe",
+	"idle.exe", "pythonw.exe", "python.exe", "codeblocks.exe", "Code.exe",
+	// Running one's own program, and the consoles that come with it.
+	"cmd.exe", "conhost.exe", "powershell.exe", "WindowsTerminal.exe",
+}
+
+// DefaultPolicy is the baseline every policy starts from.
 func DefaultPolicy() Policy {
 	return Policy{
 		Version:              1,
 		SnapshotIntervalSec:  30,
 		HeartbeatIntervalSec: 10,
 		MonitorPaste:         true,
-		ProcessWhitelist:     []string{"StudentMain.exe", "TopDomain.exe"}, // JiYu classroom
+		ProcessWhitelist:     append([]string(nil), DefaultProcessWhitelist...),
 	}
+}
+
+// DefaultPolicyFor is what a newly created exam gets. The two exam types want
+// different defaults: during practice a student looking something up in a
+// browser is studying, and alerting on it would bury the dashboard in noise
+// that nobody acts on. An exam flips those checks on.
+//
+// Network monitoring stays off even for exams. It is the noisiest check by far
+// (Windows itself talks to the internet constantly) and wants a teacher who
+// has decided to read its output - see monitor.go.
+func DefaultPolicyFor(examType string) Policy {
+	p := DefaultPolicy()
+	if examType != ExamTypeExam {
+		return p
+	}
+	p.MonitorUSB = true
+	p.MonitorProcess = true
+	p.MonitorForeground = true
+	p.ProcessBlacklist = append([]string(nil), DefaultProcessBlacklist...)
+	return p
 }
 
 // MachineInfo is recorded at login so the teacher can spot the same student
@@ -255,6 +319,11 @@ type HeartbeatRequest struct {
 	ClientTime    int64 `json:"client_time"`
 	Focused       bool  `json:"focused"`
 	PolicyVersion int   `json:"policy_version"`
+	// Foreground is the window the student is actually looking at, as seen by
+	// the OS monitor. Events record the moment of a switch; this records the
+	// present, so the dashboard can answer "is he still in there?" without
+	// replaying the event log.
+	Foreground string `json:"foreground"`
 }
 
 type HeartbeatResponse struct {
