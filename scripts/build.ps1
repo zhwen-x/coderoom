@@ -74,10 +74,23 @@ Write-Step 'CodeRoom Windows 原生构建'
 
 $go = Get-Command go -ErrorAction SilentlyContinue
 if (-not $go) {
-    Write-Host '错误: 未找到 go 命令。' -ForegroundColor Red
+    # Go being installed but absent from PATH is at least as common as it not
+    # being installed at all, so check the usual locations before telling
+    # someone to download something they already have.
+    $guesses = @('C:\dev\go\bin\go.exe', 'C:\Go\bin\go.exe',
+                 "$env:LOCALAPPDATA\Programs\Go\bin\go.exe",
+                 "$env:ProgramFiles\Go\bin\go.exe")
+    $found = $guesses | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+    Write-Host '错误: PATH 中找不到 go 命令。' -ForegroundColor Red
     Write-Host ''
-    Write-Host '请先从 https://go.dev/dl/ 安装 Go，安装后"重新打开"命令行窗口再运行本脚本'
-    Write-Host '（安装程序写入的 PATH 不会影响已经打开的窗口）。'
+    if ($found) {
+        Write-Host ("但在 {0} 找到了 Go。把它所在的目录加入 PATH 后重试：" -f $found)
+        Write-Host ('  $env:PATH = "{0};" + $env:PATH' -f (Split-Path -Parent $found))
+    } else {
+        Write-Host '请先从 https://go.dev/dl/ 安装 Go，安装后"重新打开"命令行窗口再运行本脚本'
+        Write-Host '（安装程序写入的 PATH 不会影响已经打开的窗口）。'
+    }
     exit 1
 }
 & go version

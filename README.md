@@ -153,41 +153,58 @@ packaging/              发行包附带的中文说明，两个构建脚本共�
 因此只要标准不比机房 IDE 更新就不会出现"学生本地能编译、服务端 CE"。
 填入无法识别的标准会回退为默认值并告警，不会让整场考试的提交全部编译失败。
 
-### 尚未在真机验证的部分
+### 真机验证状态
 
-Windows 二进制目前只做过交叉编译验证。以下代码路径从未在 Windows 上实际执行过：
-
-- `internal/judge/limiter_windows.go` —— Job Object 沙箱
-- `internal/client/window_windows.go` —— WebView2 窗口
-
-两者都需要在 Windows 10 上跑一次真机验证。沙箱的验证要点见下节。
+Job Object 沙箱已在 Windows 10 实机验证通过，详见下节。WebView2 窗口的渲染仍需人工确认
+（SSH 会话没有桌面，无法自动化）。
 
 ---
 
-## Windows 真机验证清单
+## Windows 真机验证
 
-沙箱是交叉编译验证不到的部分，现在已由 Windows 专有的自动化测试覆盖。
-在 Windows 上运行构建脚本即可执行：
+已在 Windows 10 Enterprise LTSC (19044) 实机验证，MinGW-w64 gcc + Python 3.14，4 核 16GB。
 
-```
-powershell -ExecutionPolicy Bypass -File scripts\build.ps1
-```
+**已验证通过：**
 
-`internal/judge/sandbox_windows_test.go`（`//go:build windows`）验证：
-
-| 测试 | 验证的是 |
+| 项目 | 结果 |
 |---|---|
-| `TestSandboxEnforcesMemoryLimit` | 内存上限。程序以 4 MiB 为单位增量提交至多 800 MiB，应判 MLE 而非含糊的运行时错误 |
-| `TestSandboxBlocksChildProcesses` | 单进程限制。程序重启自身 5 次并按退出码统计真正运行起来的子进程，应为 0 |
-| `TestSandboxSuppressesCrashDialog` | 崩溃对话框抑制。空指针解引用应判 RE 并快速返回；若判成 TLE 说明被模态框阻塞到墙钟超时 |
-| `TestSandboxAccountingIsSane` | Job Object 的时间与内存计量。这守的是手工声明的结构体布局——写错不会编译失败，只会在成绩单里静默给出垃圾数字 |
+| `scripts\build.ps1` | 首次运行即通过：node 语法检查、go vet、全量测试、编译、打包 |
+| 全量测试（4 个包） | 全部通过，judge 包真实走 Job Object 沙箱 |
+| 沙箱：内存上限 | MLE，峰值 95008 KB —— 正是 64MB 限制 + 32MB 余量的设计值 |
+| 沙箱：fork 炸弹 | 子进程全部被挡，实际运行起来的数量为 0 |
+| 沙箱：崩溃抑制 | 空指针解引用判 RE 并在 15ms 内返回，没有被对话框阻塞 |
+| 沙箱：时间与内存计量 | 读数合理，手工声明的结构体布局正确 |
+| 判题全链路 | AC / WA / CE / TLE / MLE / RE 判定全部符合预期；C++、C、Python 三种语言 |
+| 工具链自动探测 | 正确找到 MinGW 的 gcc/g++ 与 Python |
+| 学生端本地服务 | 连接、列考试、内嵌界面资源全部正常 |
+| UDP 自动发现 | 本机广播可发现服务端 |
 
-平台无关的判定逻辑（TLE / OLE / RE / CE / 两种评分方式）由常规测试覆盖，
-macOS 与 Windows 上都会跑。
+**仍需人工在桌面前确认的两项**（SSH 会话没有桌面，无法自动化）：
 
-仍需人工确认的两项：
+1. **WebView2 窗口**：运行 `coderoom-client.exe`，确认窗口打开、编辑器高亮正常、粘贴可用。
+2. **无闪窗**：判题过程中不应有控制台窗口闪烁。
 
-1. **学生端窗口**：运行 `dist\client\coderoom-client.exe`，确认 WebView2 窗口能打开、
-   编辑器高亮正常、粘贴可用。`internal/client/window_windows.go` 无法自动化测试。
-2. **无残留与无闪窗**：判题过程中不应有控制台窗口闪烁（`CREATE_NO_WINDOW`）；
-   服务端退出后任务管理器里不应有残留的学生进程（`KILL_ON_JOB_CLOSE`）。
+### 从源码构建时的两个环境问题
+
+这两个都是在实机上碰到的，不影响发行包的使用，只影响从源码构建：
+
+- **Go 不在 PATH 上**：`build.ps1` 会自动在常见位置查找并给出把它加进 PATH 的确切命令。
+- **`proxy.golang.org` 不可达**：国内网络下拉取依赖需要换代理：
+
+  ```
+  $env:GOPROXY = "https://goproxy.cn,direct"
+  ```
+
+## Windows 防火墙（部署必读）
+
+**这是实机测试中最重要的发现。** Windows 防火墙默认拦截新程序的入站连接：服务端会正常监听、
+横幅会正常显示局域网地址，但**每一台学生机都连不上**，TCP 与 UDP 自动发现端口都被挡。
+在机房里，这会在开考前才暴露。
+
+服务端启动时会自检并在横幅中给出提示。以管理员身份运行一次即可放行：
+
+```
+coderoom-server.exe -setup-firewall
+```
+
+它会为当前端口添加 TCP 与 UDP 入站规则（改端口后重新运行一次即可，旧规则会被替换）。

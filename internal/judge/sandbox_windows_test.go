@@ -20,23 +20,40 @@ import (
 
 // cppMemoryHog commits memory in 4 MiB chunks until the allocator refuses.
 //
-// The incremental shape matters. A single huge `new` would be rejected
-// outright by the job's limit, leaving peak memory low and the verdict an
-// ambiguous runtime error. Allocating gradually and touching each page is what
-// drives measured peak memory past the problem's limit, which is what MLE is
-// actually defined as here.
+// Two details are load-bearing, both learned from this test failing on real
+// hardware:
+//
+//   - The allocations must be *read back*. An earlier version only wrote to
+//     the blocks and never used them, so -O2 deleted the whole loop as dead
+//     stores: the program finished in 15ms having committed 6 MB, and the
+//     verdict came out WA instead of MLE.
+//   - The chunks must be gradual. A single huge allocation is refused outright
+//     by the job's limit, leaving peak memory low and producing an ambiguous
+//     runtime error rather than MLE.
+//
+// It also prints how many chunks it obtained, which is the diagnostic that
+// makes a future failure readable.
 const cppMemoryHog = `
 #include <cstdlib>
+#include <cstdio>
 int main() {
     const size_t chunk = 4u << 20;          // 4 MiB
-    for (int i = 0; i < 200; i++) {         // up to 800 MiB if unconstrained
+    static char* blocks[200];               // up to 800 MiB if unconstrained
+    int got = 0;
+    for (int i = 0; i < 200; i++) {
         char* p = (char*)malloc(chunk);
-        if (!p) return 1;                   // allocator refused: limit reached
-        // One byte per 4 KiB page, each a different value. Touching every page
-        // commits it; varying the value stops a host that compresses memory
-        // from making the footprint disappear.
+        if (!p) break;                      // allocator refused: limit reached
+        // One byte per 4 KiB page, each a different value: touching every page
+        // commits it, and varying the value stops a host that compresses
+        // memory from making the footprint disappear.
         for (size_t k = 0; k < chunk; k += 4096) p[k] = (char)(i + (int)(k >> 12));
+        blocks[got++] = p;
     }
+    // Reading the blocks back is what keeps the optimiser from deleting
+    // everything above.
+    unsigned long sum = 0;
+    for (int i = 0; i < got; i++) sum += (unsigned char)blocks[i][0];
+    printf("%d %lu\n", got, sum);
     return 0;
 }`
 
@@ -55,7 +72,9 @@ func TestSandboxEnforcesMemoryLimit(t *testing.T) {
 		t.Fatalf("judge error: %v", err)
 	}
 	if res.Verdict != protocol.VerdictMLE {
-		t.Fatalf("verdict = %s, want MLE\n  峰值内存 %d KB (限制 %d KB)\n  编译日志: %s\n  测试点: %+v",
+		t.Fatalf("verdict = %s, want MLE\n  峰值内存 %d KB (限制 %d KB)\n"+
+			"  程序输出的是「已获得的块数 校验和」，块数远小于 200 才说明限制生效\n"+
+			"  编译日志: %s\n  测试点: %+v",
 			res.Verdict, res.MemoryKB, 64*1024, res.CompileLog, res.Cases)
 	}
 	if res.Score != 0 {
