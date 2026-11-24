@@ -231,7 +231,7 @@ func TestRealRecoveryTaskPointsAtThisExecutable(t *testing.T) {
 	enf := requireEnforceable(t)
 	guardRail(t, enf)
 
-	if err := enf.installRecovery(recoveryTaskName, os.Getpid()); err != nil {
+	if err := enf.installRecovery(recoveryTaskName, os.Getpid(), true); err != nil {
 		t.Fatalf("安装开机恢复任务失败: %v", err)
 	}
 	out, err := exec.Command("schtasks", "/Query", "/TN", recoveryTaskName, "/FO", "LIST", "/V").Output()
@@ -285,4 +285,39 @@ func containsFold(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+// In a lab that restores its machines on reboot the startup task must not be
+// created at all - it cannot survive the restore, and a task captured into a
+// machine image is exactly the kind of leftover this milestone is about.
+func TestRealBootTaskSkippedWhereTheRoomRestoresItself(t *testing.T) {
+	enf := requireEnforceable(t)
+	original := guardRail(t, enf)
+	g, _, _ := newRealGuard(t, enf)
+
+	p := bothBlocked()
+	p.RebootRestoresSystem = true
+	if err := g.Apply(p, someInfo()); err != nil {
+		t.Fatalf("应用管控失败: %v", err)
+	}
+
+	if taskExists(recoveryTaskName) {
+		t.Error("会还原的机房里仍然安装了开机任务")
+	}
+	if !taskExists(recoveryTickName) {
+		t.Error("每分钟恢复任务缺失——进程树被杀时无人兜底")
+	}
+	if usbStartNow(t) != usbStartDisabled {
+		t.Error("管控本身没生效")
+	}
+
+	if err := g.Release("测试结束"); err != nil {
+		t.Fatalf("解除失败: %v", err)
+	}
+	if got := usbStartNow(t); got != original.Start {
+		t.Errorf("USBSTOR Start = %d，应还原为 %d", got, original.Start)
+	}
+	if taskExists(recoveryTickName) {
+		t.Error("每分钟恢复任务残留")
+	}
 }

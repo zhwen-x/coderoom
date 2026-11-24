@@ -35,10 +35,10 @@ func (nullEnforcer) restoreUSB(usbSnapshot) error      { return errUnsupported }
 func (nullEnforcer) snapshotFirewall() (firewallSnapshot, error) {
 	return firewallSnapshot{}, errUnsupported
 }
-func (nullEnforcer) blockInternet([]string) error           { return errUnsupported }
-func (nullEnforcer) restoreFirewall(firewallSnapshot) error { return errUnsupported }
-func (nullEnforcer) installRecovery(string, int) error      { return errUnsupported }
-func (nullEnforcer) removeRecovery(string) error            { return errUnsupported }
+func (nullEnforcer) blockInternet([]string) error            { return errUnsupported }
+func (nullEnforcer) restoreFirewall(firewallSnapshot) error  { return errUnsupported }
+func (nullEnforcer) installRecovery(string, int, bool) error { return errUnsupported }
+func (nullEnforcer) removeRecovery(string) error             { return errUnsupported }
 
 func guardJournalPath(dataDir string) string {
 	return filepath.Join(dataDir, "guard.json")

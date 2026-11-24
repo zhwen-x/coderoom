@@ -98,12 +98,17 @@ func (f *fakeEnforcer) restoreFirewall(s firewallSnapshot) error {
 	return nil
 }
 
-func (f *fakeEnforcer) installRecovery(name string, ownerPID int) error {
+func (f *fakeEnforcer) installRecovery(name string, ownerPID int, bootTask bool) error {
 	f.ownerPID = ownerPID
 	if err := f.record("installRecovery"); err != nil {
 		return err
 	}
-	f.tasks[name] = true
+	if bootTask {
+		f.tasks[name] = true
+	} else {
+		delete(f.tasks, name)
+	}
+	f.tasks[recoveryTickName] = true
 	return nil
 }
 
@@ -111,7 +116,10 @@ func (f *fakeEnforcer) removeRecovery(name string) error {
 	if err := f.record("removeRecovery"); err != nil {
 		return err
 	}
+	// Both names are always removed, mirroring the Windows enforcer: a task
+	// left from a run under a different setting must not survive.
 	delete(f.tasks, name)
+	delete(f.tasks, recoveryTickName)
 	return nil
 }
 
@@ -226,7 +234,7 @@ func TestApplyThenReleaseLeavesNothingBehind(t *testing.T) {
 	if err := h.g.Apply(bothBlocked(), someInfo()); err != nil {
 		t.Fatal(err)
 	}
-	if h.enf.usbStart != 4 || len(h.enf.rules) != 2 || len(h.enf.tasks) != 1 {
+	if h.enf.usbStart != 4 || len(h.enf.rules) != 2 || len(h.enf.tasks) != 2 {
 		t.Fatalf("policy not applied: usb=%d rules=%v tasks=%v",
 			h.enf.usbStart, h.enf.rules, h.enf.tasks)
 	}
@@ -597,4 +605,62 @@ func deadPID(t *testing.T) int {
 	}
 	t.Skip("找不到一个确定不存在的 pid")
 	return 0
+}
+
+// Many labs revert their machines to a clean image on every restart. There the
+// startup task cannot do its job - the restore wipes the task registration
+// along with the lock it would have undone - so it is skipped. The
+// every-minute task is unaffected, because a process-tree kill has nothing to
+// do with rebooting.
+func TestBootTaskSkippedWhereTheRoomRestoresItself(t *testing.T) {
+	h := newGuardHarness(t)
+	p := bothBlocked()
+	p.RebootRestoresSystem = true
+
+	if err := h.g.Apply(p, someInfo()); err != nil {
+		t.Fatal(err)
+	}
+	if h.enf.tasks[recoveryTaskName] {
+		t.Error("开机任务仍被安装；在会还原的机房里它无法生效")
+	}
+	if !h.enf.tasks[recoveryTickName] {
+		t.Error("每分钟恢复任务被一起关掉了；它和重启无关，必须保留")
+	}
+	// The lock itself is unchanged - only the one recovery layer that cannot
+	// work here is dropped.
+	if h.enf.usbStart != 4 || len(h.enf.rules) != 2 {
+		t.Errorf("管控本身受影响了: usb=%d rules=%v", h.enf.usbStart, h.enf.rules)
+	}
+
+	if err := h.g.Release("考试结束"); err != nil {
+		t.Fatal(err)
+	}
+	if h.enf.locked() {
+		t.Errorf("解除后仍有残留: usb=%d rules=%v tasks=%v",
+			h.enf.usbStart, h.enf.rules, h.enf.tasks)
+	}
+}
+
+// Switching the setting mid-exam must not leave the task from the previous
+// setting running.
+func TestChangingTheRoomSettingClearsAStaleBootTask(t *testing.T) {
+	h := newGuardHarness(t)
+	if err := h.g.Apply(bothBlocked(), someInfo()); err != nil {
+		t.Fatal(err)
+	}
+	if !h.enf.tasks[recoveryTaskName] {
+		t.Fatal("前置条件：默认应安装开机任务")
+	}
+
+	p := bothBlocked()
+	p.RebootRestoresSystem = true
+	if err := h.g.Apply(p, someInfo()); err != nil {
+		t.Fatal(err)
+	}
+	if h.enf.tasks[recoveryTaskName] {
+		t.Error("改设置后旧的开机任务仍在")
+	}
+	if !h.enf.tasks[recoveryTickName] {
+		t.Error("每分钟恢复任务丢了")
+	}
 }

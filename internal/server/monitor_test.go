@@ -719,3 +719,32 @@ func TestPublishingADraftKeepsAScheduledStart(t *testing.T) {
 		t.Errorf("scheduled start lost on publish: %v, want %d", got.StartAt, scheduled)
 	}
 }
+
+// The room setting has to survive the policy round trip and reach the client,
+// since it decides which recovery layer each machine installs.
+func TestRoomRestoresSettingReachesTheClient(t *testing.T) {
+	h := newHarness(t)
+	_, examID := h.seedExam()
+	login := h.login(examID, "2023", "张三", "")
+	if login.Policy.RebootRestoresSystem {
+		t.Fatal("precondition: the cautious default is off")
+	}
+
+	var saved protocol.Policy
+	status, raw := h.do(http.MethodPut, "/api/teacher/exams/"+itoa(examID)+"/policy",
+		map[string]any{
+			"block_usb_storage": true, "reboot_restores_system": true,
+		}, true)
+	h.mustJSON(status, raw, &saved)
+	if !saved.RebootRestoresSystem {
+		t.Fatalf("setting not saved: %+v", saved)
+	}
+
+	var hb protocol.HeartbeatResponse
+	status, raw = h.do(http.MethodPost, "/api/client/heartbeat",
+		protocol.HeartbeatRequest{PolicyVersion: login.PolicyVersion}, false)
+	h.mustJSON(status, raw, &hb)
+	if hb.Policy == nil || !hb.Policy.RebootRestoresSystem {
+		t.Errorf("client not told about the room: %+v", hb.Policy)
+	}
+}

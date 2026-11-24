@@ -129,10 +129,24 @@ type Policy struct {
 	ProcessWhitelist  []string `json:"process_whitelist"`
 
 	// Enforcement (M4) - requires admin rights and a watchdog that can undo
-	// every change. Always false before M4.
+	// every change.
 	BlockUSBStorage bool     `json:"block_usb_storage"`
 	BlockInternet   bool     `json:"block_internet"`
 	AllowedHosts    []string `json:"allowed_hosts"`
+
+	// RebootRestoresSystem says the lab's machines revert to a clean image on
+	// every restart - a restore card, Deep Freeze, or shared-disk protection.
+	//
+	// It is phrased as a fact about the room rather than as a switch for a
+	// mechanism, because that is what a teacher actually knows. Where it is
+	// true the boot-time recovery task is not merely redundant, it cannot
+	// work: the restore wipes the task registration along with everything
+	// else, so the only thing it would achieve is leaving a scheduled task in
+	// the image if one were ever captured mid-exam.
+	//
+	// Default false, which keeps the safety net. A teacher who gets this wrong
+	// in the cautious direction loses nothing.
+	RebootRestoresSystem bool `json:"reboot_restores_system"`
 }
 
 // DefaultProcessBlacklist is what a new exam watches for: browsers, instant

@@ -50,9 +50,13 @@ const journalVersion = 1
 // schtasks rejects /RI on an ONSTART schedule, so the boot trigger and the
 // every-minute trigger have to be separate tasks.
 //
-//   - recoveryTaskName fires at startup, which is the power-cut case.
+//   - recoveryTaskName fires at startup, which is the power-cut case. It is
+//     skipped where the lab restores its machines on reboot, since there it
+//     cannot work: the restore wipes the task along with the lock it would
+//     have undone.
 //   - recoveryTickName fires every minute, which is the case where the
 //     client's whole process tree was killed and took the watchdog with it.
+//     That has nothing to do with rebooting, so it is always installed.
 //
 // Both run the same command, and it does nothing while the client that
 // applied the lock is still alive. Names are fixed so any build can find and
@@ -103,6 +107,10 @@ type journal struct {
 	USB      *usbSnapshot      `json:"usb,omitempty"`
 	Firewall *firewallSnapshot `json:"firewall,omitempty"`
 	Task     string            `json:"recovery_task,omitempty"`
+	// BootTask records whether the startup trigger was installed, so that
+	// turning the room setting on or off mid-exam is seen as a change rather
+	// than being silently ignored.
+	BootTask bool `json:"boot_task"`
 }
 
 func (j *journal) empty() bool {
@@ -129,8 +137,9 @@ type enforcer interface {
 	// installRecovery registers something that will restore this machine even
 	// if no CodeRoom process ever runs on it again. ownerPID is the client
 	// that holds the lock, so the recovery can tell "still mid-exam" from
-	// "the client is gone".
-	installRecovery(taskName string, ownerPID int) error
+	// "the client is gone". bootTask asks for the startup trigger as well as
+	// the every-minute one.
+	installRecovery(taskName string, ownerPID int, bootTask bool) error
 	removeRecovery(taskName string) error
 }
 
@@ -268,7 +277,8 @@ func (g *Guard) Apply(p protocol.Policy, info applyInfo) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	if g.holds(wantUSB, wantNet) {
+	bootTask := !p.RebootRestoresSystem
+	if g.holds(wantUSB, wantNet, bootTask) {
 		return nil
 	}
 	ok, reason := g.d.enf.available()
@@ -296,6 +306,7 @@ func (g *Guard) Apply(p protocol.Policy, info applyInfo) error {
 		StudentNo: info.StudentNo,
 		OwnerPID:  os.Getpid(),
 		Task:      recoveryTaskName,
+		BootTask:  bootTask,
 	}
 
 	// Capture everything that is about to change, before changing any of it.
@@ -320,7 +331,11 @@ func (g *Guard) Apply(p protocol.Policy, info applyInfo) error {
 	if err := g.writeJournal(j); err != nil {
 		return g.failed("写入恢复记录失败", err)
 	}
-	if err := g.d.enf.installRecovery(recoveryTaskName, j.OwnerPID); err != nil {
+	// Where the room restores itself on reboot the startup trigger is dropped:
+	// it would be wiped by the same restore that undoes the lock, so all it
+	// could do is clutter the image. Everything else is unchanged - the
+	// every-minute task, the watchdog and all the normal release paths.
+	if err := g.d.enf.installRecovery(recoveryTaskName, j.OwnerPID, bootTask); err != nil {
 		_ = os.Remove(g.d.jrnlPath)
 		return g.failed("安装开机恢复任务失败", err)
 	}
@@ -356,11 +371,13 @@ func (g *Guard) Apply(p protocol.Policy, info applyInfo) error {
 	return nil
 }
 
-func (g *Guard) holds(usb, net bool) bool {
+func (g *Guard) holds(usb, net, bootTask bool) bool {
 	if g.applied == nil {
 		return false
 	}
-	return (g.applied.USB != nil) == usb && (g.applied.Firewall != nil) == net
+	return (g.applied.USB != nil) == usb &&
+		(g.applied.Firewall != nil) == net &&
+		g.applied.BootTask == bootTask
 }
 
 func (g *Guard) failed(what string, err error) error {

@@ -239,14 +239,19 @@ func netshOutput(args ...string) (string, error) {
 
 // ------------------------------------------------------------ boot recovery
 
-// installRecovery registers a startup task that restores this machine even if
-// no CodeRoom process ever runs on it again.
+// installRecovery registers the scheduled tasks that restore this machine even
+// if no CodeRoom process ever runs on it again.
 //
-// This is the layer that covers the case nothing else can: the power goes out
+// The startup task covers the case nothing else can: the power goes out
 // mid-exam. The journal survives on disk, but something has to read it, and
 // the client may not be launched for days. A SYSTEM task at boot needs no
 // student, no login and no network.
-func (w *winEnforcer) installRecovery(taskName string, ownerPID int) error {
+//
+// bootTask is false in labs whose machines revert to a clean image on restart.
+// There the startup task is not a weaker safety net, it is a non-functional
+// one - the restore removes the task registration too - and the reboot itself
+// is what undoes the lock.
+func (w *winEnforcer) installRecovery(taskName string, ownerPID int, bootTask bool) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("定位本程序路径: %w", err)
@@ -259,16 +264,26 @@ func (w *winEnforcer) installRecovery(taskName string, ownerPID int) error {
 	action := fmt.Sprintf(`"%s" -restore-if-gone %d`, exe, ownerPID)
 
 	// At startup: the power-cut case.
-	if err := schtasks("/Create", "/TN", taskName, "/TR", action,
-		"/SC", "ONSTART", "/RU", "SYSTEM", "/RL", "HIGHEST", "/F"); err != nil {
-		return err
+	if bootTask {
+		if err := schtasks("/Create", "/TN", taskName, "/TR", action,
+			"/SC", "ONSTART", "/RU", "SYSTEM", "/RL", "HIGHEST", "/F"); err != nil {
+			return err
+		}
+	} else {
+		// A stale task from a run under the previous setting would otherwise
+		// outlive the change.
+		_ = deleteTask(taskName)
 	}
 	// Every minute: the case where the client's process tree was killed and
 	// took the watchdog with it. Repeating is safe because the command does
-	// nothing while the client that applied the lock is still alive.
+	// nothing while the client that applied the lock is still alive. This one
+	// is always installed - a process-tree kill has nothing to do with
+	// whether the room restores on reboot.
 	if err := schtasks("/Create", "/TN", recoveryTickName, "/TR", action,
 		"/SC", "MINUTE", "/MO", "1", "/RU", "SYSTEM", "/RL", "HIGHEST", "/F"); err != nil {
-		_, _ = schtasksOutput("/Delete", "/TN", taskName, "/F")
+		if bootTask {
+			_, _ = schtasksOutput("/Delete", "/TN", taskName, "/F")
+		}
 		return err
 	}
 	return nil

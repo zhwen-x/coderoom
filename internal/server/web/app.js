@@ -364,6 +364,10 @@ function openPolicyEditor(e) {
   };
   const boxes = MONITOR_FIELDS.map((f) => makeBox(f, false));
   const enforceBoxes = ENFORCE_FIELDS.map((f) => makeBox(f, true));
+  // Not one of the enforcement switches: it does not change what is enforced,
+  // only which recovery layer is worth installing in this room.
+  const restoreBox = el('input', { type: 'checkbox' });
+  restoreBox.checked = !!p.reboot_restores_system;
 
   const black = el('textarea', { rows: '6' });
   black.value = (p.process_blacklist || []).join('\n');
@@ -396,6 +400,13 @@ function openPolicyEditor(e) {
     el('p', { class: 'warn small' },
       '需要学生端以管理员身份运行。没有管理员权限的机器不会被管控，' +
       '并会在监考看板上标红——不会假装成功。'),
+    el('div', {},
+      el('label', { class: 'row' }, restoreBox, el('strong', {}, '机房重启会自动还原系统')),
+      el('div', { class: 'muted small' },
+        '装了还原卡 / 冰点还原 / 共享盘保护的机房勾选。勾选后不再创建"开机恢复"' +
+        '计划任务——在这类机房里它本来也跑不起来：还原会把任务本身一起抹掉。' +
+        '其余恢复手段全部保留（每分钟恢复任务、看门狗、正常释放、紧急解除、-restore）。' +
+        '不确定就别勾，多装一个任务没有坏处。'),),
     el('p', { class: 'muted small' },
       '恢复有五重保障：考试结束/登出/退出自动恢复；客户端被强杀由看门狗恢复；' +
       '断电重启由开机计划任务恢复；教师可在上方「紧急解除管控」一键解除；' +
@@ -412,6 +423,7 @@ function openPolicyEditor(e) {
         });
         black.value = (d.process_blacklist || []).join('\n');
         white.value = (d.process_whitelist || []).join('\n');
+        restoreBox.checked = !!d.reboot_restores_system;
       },
     }, '恢复默认'),
     el('button', {
@@ -422,6 +434,7 @@ function openPolicyEditor(e) {
           heartbeat_interval_sec: Number(beat.value),
           process_blacklist: lines(black),
           process_whitelist: lines(white),
+          reboot_restores_system: restoreBox.checked,
         };
         [...boxes, ...enforceBoxes].forEach((b) => {
           const cb = b.querySelector('input');
