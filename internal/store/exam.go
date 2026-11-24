@@ -378,24 +378,59 @@ func (s *Store) SetExamPolicy(ctx context.Context, id int64, p protocol.Policy) 
 	return version, nil
 }
 
+// hasRun reports whether an exam in this state has already been opened once,
+// and therefore carries timestamps from that run.
+func hasRun(state string) bool {
+	switch state {
+	case protocol.ExamStateRunning, protocol.ExamStateEnded,
+		protocol.ExamStateJudging, protocol.ExamStateGraded:
+		return true
+	}
+	return false
+}
+
 // SetExamState advances the lifecycle. start_at is stamped on the transition
 // into running when the teacher did not schedule one, so the countdown always
 // has a server-side origin.
+//
+// Going backwards clears that run's clock. A teacher who ends a session and
+// then publishes it again means "run it again" - but end_at is still sitting
+// there from the first run, so every client that joined would be told the
+// deadline passed before they logged in, and the server would refuse their
+// submissions. The old start_at is just as wrong: 开考 keeps whichever start
+// is already there, so the countdown would resume from yesterday.
+//
+// Only a state that actually ran is cleared, so a start time scheduled on a
+// draft exam survives being published.
 func (s *Store) SetExamState(ctx context.Context, id int64, state string) error {
 	now := NowMS()
 	return s.write(ctx, func(tx *sql.Tx) error {
-		if state == protocol.ExamStateRunning {
+		var prev string
+		err := tx.QueryRowContext(ctx, `SELECT state FROM exams WHERE id=?`, id).Scan(&prev)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		} else if err != nil {
+			return err
+		}
+
+		switch {
+		case state == protocol.ExamStateRunning:
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE exams SET start_at=COALESCE(start_at, ?) WHERE id=?`, now, id); err != nil {
 				return err
 			}
-		}
-		if state == protocol.ExamStateEnded {
+		case state == protocol.ExamStateEnded:
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE exams SET end_at=COALESCE(end_at, ?) WHERE id=?`, now, id); err != nil {
 				return err
 			}
+		case (state == protocol.ExamStateDraft || state == protocol.ExamStatePublished) && hasRun(prev):
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE exams SET start_at=NULL, end_at=NULL WHERE id=?`, id); err != nil {
+				return err
+			}
 		}
+
 		res, err := tx.ExecContext(ctx,
 			`UPDATE exams SET state=?, updated_at=? WHERE id=?`, state, now, id)
 		if err != nil {

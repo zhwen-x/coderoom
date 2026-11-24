@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"syscall"
+	"time"
 
 	"coderoom/internal/client"
 )
@@ -58,7 +59,13 @@ func main() {
 			logger.Printf("本地界面服务异常: %v", err)
 		}
 	}()
-	go app.Run(ctx)
+	// app.Run owns the final flush, so main has to wait for it rather than
+	// returning the moment the window closes.
+	background := make(chan struct{})
+	go func() {
+		defer close(background)
+		app.Run(ctx)
+	}()
 
 	url := baseURL + "/"
 	if *serverAddr != "" {
@@ -79,8 +86,24 @@ func main() {
 		fatal(logger, "%v", err)
 	}
 	stop()
-	logger.Println("客户端已退出")
+
+	// Without this wait the process exits while the last upload is still in
+	// flight: the student's final code and the "client exiting" event stay on
+	// disk, and the teacher's dashboard cannot tell a student who closed the
+	// client properly from one who killed the process. The flush bounds itself
+	// to a few seconds; the timeout here is only a guard against a wedged
+	// goroutine holding the window-less process open.
+	select {
+	case <-background:
+	case <-time.After(backgroundStopTimeout):
+		logger.Printf("后台任务未能在 %s 内收尾，仍然退出", backgroundStopTimeout)
+	}
 }
+
+// backgroundStopTimeout is deliberately a little longer than the client's own
+// flush budget, so the flush decides when to give up and this only catches a
+// goroutine that never finished at all.
+const backgroundStopTimeout = 6 * time.Second
 
 func defaultDataDir() string {
 	exe, err := os.Executable()

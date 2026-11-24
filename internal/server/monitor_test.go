@@ -528,3 +528,106 @@ func readStream(t *testing.T, h *harness, examID, cursor int64, want string) str
 	t.Fatalf("stream closed without a %q frame", want)
 	return ""
 }
+
+// ------------------------------------------------------- rerunning a session
+
+// A teacher who ends a session and publishes it again means "run it again".
+// The first run's end_at used to stay behind, so every client that joined was
+// told the deadline had already passed - and the server refused their
+// submissions with 已超过交卷时间 before anyone had typed anything.
+func TestRepublishingAnEndedExamClearsThePreviousRunsClock(t *testing.T) {
+	h := newHarness(t)
+	var p store.Problem
+	status, raw := h.do(http.MethodPost, "/api/teacher/problems", map[string]any{
+		"title": "A+B", "languages": []string{"cpp"},
+	}, true)
+	h.mustJSON(status, raw, &p)
+
+	var e store.Exam
+	status, raw = h.do(http.MethodPost, "/api/teacher/exams", map[string]any{
+		"name": "可重复使用的练习", "type": "practice", "duration_min": 60,
+		"show_results": true, "allow_rejudge": true, "state": "draft",
+		"items": []map[string]any{{"problem_id": p.ID, "score": 100}},
+	}, true)
+	h.mustJSON(status, raw, &e)
+
+	setState := func(state string) {
+		h.t.Helper()
+		status, raw := h.do(http.MethodPost, "/api/teacher/exams/"+itoa(e.ID)+"/state",
+			map[string]any{"state": state}, true)
+		h.mustJSON(status, raw, nil)
+	}
+	paper := func() protocol.PaperResponse {
+		h.t.Helper()
+		var out protocol.PaperResponse
+		status, raw := h.do(http.MethodGet, "/api/client/paper", nil, false)
+		h.mustJSON(status, raw, &out)
+		return out
+	}
+
+	// First run, all the way through.
+	setState("published")
+	setState("running")
+	setState("ended")
+
+	// Run it again.
+	setState("published")
+	h.login(e.ID, "2301", "张三", "")
+	if d := paper().Deadline; d != nil {
+		t.Fatalf("a republished session still carries a deadline: %d", *d)
+	}
+
+	setState("running")
+	after := paper()
+	if after.Locked {
+		t.Fatalf("paper still locked on the second run: %s", after.Reason)
+	}
+	now := store.NowMS()
+	if after.Deadline == nil {
+		t.Fatal("no countdown on the second run")
+	}
+	if *after.Deadline <= now {
+		t.Errorf("countdown starts already expired: deadline %d, now %d", *after.Deadline, now)
+	}
+
+	// The real symptom: submissions were refused outright.
+	var sub protocol.SubmitResponse
+	status, raw = h.do(http.MethodPost, "/api/client/submit", protocol.SubmitRequest{
+		ProblemID: p.ID, Language: "cpp", Code: "int main(){}",
+		Hash: store.HashCode("int main(){}"), ClientTime: store.NowMS(),
+	}, false)
+	if status != http.StatusOK {
+		t.Fatalf("submission refused on the second run: HTTP %d %s", status, raw)
+	}
+	h.mustJSON(status, raw, &sub)
+}
+
+// Going from draft to published is a forward step, not a rerun, so a start
+// time scheduled on a draft must survive it.
+func TestPublishingADraftKeepsAScheduledStart(t *testing.T) {
+	h := newHarness(t)
+	var p store.Problem
+	status, raw := h.do(http.MethodPost, "/api/teacher/problems", map[string]any{
+		"title": "A+B", "languages": []string{"cpp"},
+	}, true)
+	h.mustJSON(status, raw, &p)
+
+	scheduled := store.NowMS() + 3_600_000
+	var e store.Exam
+	status, raw = h.do(http.MethodPost, "/api/teacher/exams", map[string]any{
+		"name": "预约开考", "type": "exam", "state": "draft", "start_at": scheduled,
+		"items": []map[string]any{{"problem_id": p.ID, "score": 100}},
+	}, true)
+	h.mustJSON(status, raw, &e)
+
+	status, raw = h.do(http.MethodPost, "/api/teacher/exams/"+itoa(e.ID)+"/state",
+		map[string]any{"state": "published"}, true)
+	h.mustJSON(status, raw, nil)
+
+	var got store.Exam
+	status, raw = h.do(http.MethodGet, "/api/teacher/exams/"+itoa(e.ID), nil, true)
+	h.mustJSON(status, raw, &got)
+	if got.StartAt == nil || *got.StartAt != scheduled {
+		t.Errorf("scheduled start lost on publish: %v, want %d", got.StartAt, scheduled)
+	}
+}

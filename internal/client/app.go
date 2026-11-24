@@ -415,12 +415,22 @@ func (a *App) hLogin(w http.ResponseWriter, r *http.Request) {
 	// previous occupant's drafts.
 	prev := a.local.State()
 	fresh := prev.StudentNo != res.StudentNo || prev.ExamID != res.Exam.ID
+	if fresh && len(prev.PendingEvents) > 0 {
+		// Events are attributed by session token, so anything still queued
+		// from the previous occupant would be filed under this student. Being
+		// flagged for someone else's USB stick is far worse than the loss, and
+		// a student logging back in after a crash keeps their own queue
+		// because the number and exam still match.
+		a.logger.Printf("本机换了学生（%s -> %s），丢弃上一位留下的 %d 条未上报事件",
+			prev.StudentNo, res.StudentNo, len(prev.PendingEvents))
+	}
 	_ = a.local.Update(func(st *LocalState) {
 		st.StudentNo = res.StudentNo
 		st.Name = res.Name
 		st.ExamID = res.Exam.ID
 		if fresh {
 			st.Drafts = map[int64]*Draft{}
+			st.PendingEvents = nil
 		}
 	})
 
@@ -679,18 +689,60 @@ func dur(sec, fallback int) time.Duration {
 	return time.Duration(sec) * time.Second
 }
 
+// shutdownFlushTimeout bounds the last upload attempt. On a working LAN the
+// whole flush takes milliseconds; if it has not gone through in three seconds
+// the server is unreachable and waiting longer only keeps a window-less
+// process alive in front of the student. Nothing is lost by giving up: the
+// queue is on disk and goes out on the next launch.
+const shutdownFlushTimeout = 3 * time.Second
+
 // shutdownFlush makes a last attempt to push unsent work when the student
 // closes the client normally.
+//
+// The exit event is what separates "closed the client" from "killed the
+// process" on the teacher's dashboard - the latter shows up only as a lost
+// heartbeat - so it is worth the wait in Run's caller.
 func (a *App) shutdownFlush() {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownFlushTimeout)
 	defer cancel()
-	a.local.QueueEvent(protocol.Event{
-		Type:       protocol.EvClientExiting,
-		Severity:   protocol.SevInfo,
-		ClientTime: time.Now().UnixMilli(),
-	})
+
+	// Only a logged-in client has a session to attribute the event to. Queued
+	// without one it would sit on disk and be delivered under whichever
+	// student logs in next.
+	if a.isLoggedIn() {
+		a.local.QueueEvent(protocol.Event{
+			Type:       protocol.EvClientExiting,
+			Severity:   protocol.SevInfo,
+			ClientTime: time.Now().UnixMilli(),
+		})
+	}
 	a.uploadDirtyDrafts(ctx)
 	a.flushEvents(ctx)
+
+	// Say what actually left the machine. This is the line a teacher needs
+	// when the dashboard shows no exit for a student, and the line a student
+	// needs when asked to hand in their log after a disputed exam.
+	ls := a.local.State()
+	stuck := 0
+	for _, d := range ls.Drafts {
+		if d.Dirty() {
+			stuck++
+		}
+	}
+	switch {
+	case len(ls.PendingEvents) == 0 && stuck == 0:
+		a.logger.Printf("客户端退出：代码与事件均已上报服务端")
+	default:
+		a.logger.Printf("客户端退出：仍有 %d 份代码、%d 条事件未能上报（服务端不可达），"+
+			"已保留在本机 %s，下次登录后自动补发",
+			stuck, len(ls.PendingEvents), a.dataDir)
+	}
+}
+
+func (a *App) isLoggedIn() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.loggedIn
 }
 
 func (a *App) heartbeat(ctx context.Context) {
