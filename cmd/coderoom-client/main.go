@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"coderoom/internal/client"
+	"coderoom/internal/winui"
 )
 
 func main() {
@@ -39,7 +40,19 @@ func main() {
 		"内部使用：监视指定进程，其退出后立即解除本机管控")
 	restoreIfGone := flag.Int("restore-if-gone", -1,
 		"内部使用：由开机恢复任务调用；仅当应用管控的客户端已不存在时才恢复")
+	console := flag.Bool("console", false,
+		"保留黑色控制台窗口（排查问题时用；正常使用不需要）")
 	flag.Parse()
+
+	// Normal use is the window and nothing else. The console that Windows
+	// gives a console-subsystem program would otherwise sit behind the exam
+	// client where a student can close it - and closing it ends the client,
+	// which ends monitoring and releases any exam lock. The diagnostic modes
+	// below keep their console, because their entire output is text.
+	guiRun := !*console && !*restore && *restoreIfGone < 0 && *watchdog <= 0 && !*noWindow
+	if guiRun {
+		winui.HideConsole()
+	}
 
 	logFile, logger := openLogger(*dataDir)
 	if logFile != nil {

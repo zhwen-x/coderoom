@@ -68,6 +68,10 @@ copy_note packaging/server-readme.txt "$OUT/server/读我.txt"
 # -setup-firewall flag, so the teacher gets a script that elevates itself.
 cp packaging/setup-firewall.cmd "$OUT/server/放行防火墙.cmd"
 copy_note packaging/client-readme.txt "$OUT/client/读我.txt"
+# The last-resort escape from a stuck exam lock. The client hides its console
+# in normal use, so double-clicking the exe opens the UI rather than running a
+# flag; this gives the teacher something they can double-click instead.
+cp packaging/restore-guard.cmd "$OUT/client/恢复考场管控.cmd"
 
 echo
 echo "完成。产物:"

@@ -20,6 +20,7 @@ import (
 
 	"coderoom/internal/server"
 	"coderoom/internal/store"
+	"coderoom/internal/winui"
 )
 
 func main() {
@@ -31,6 +32,8 @@ func main() {
 	openUI := flag.Bool("open", true, "启动后自动在浏览器中打开教师端")
 	setupFirewall := flag.Bool("setup-firewall", false,
 		"添加 Windows 防火墙入站规则后退出（需以管理员身份运行）")
+	console := flag.Bool("console", false,
+		"始终保留运行窗口，不最小化到托盘")
 	flag.Parse()
 
 	logger := log.New(os.Stdout, "", log.LstdFlags)
@@ -76,10 +79,97 @@ func main() {
 		go openBrowser(srv.AdminURL())
 	}
 
+	// The server runs for a whole morning on the teacher's machine, so by
+	// default it gets out of the way: the window is hidden and a tray icon
+	// takes its place. The window is hidden rather than never created, which
+	// is what lets "显示运行窗口" bring back the banner and the judge log
+	// exactly as they were.
+	if !*console && runTray(ctx, stop, srv, logger) {
+		return
+	}
+
 	if err := srv.Run(ctx); err != nil {
 		logger.Fatalf("服务端异常退出: %v", err)
 	}
 	logger.Println("服务端已停止")
+}
+
+// runTray serves from the background with a tray icon in front. It reports
+// whether it took over; false means the caller should run normally, which is
+// what happens on a machine with no tray to put an icon in.
+func runTray(ctx context.Context, stop context.CancelFunc,
+	srv *server.Server, logger *log.Logger) bool {
+
+	if !winui.HideConsole() {
+		return false // no console window: nothing to minimise, nothing gained
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.Run(ctx)
+		// Cancelling here is what removes the tray icon when the server stops
+		// by itself - a port already in use, say. Without it the teacher would
+		// be left with an icon that looks like a running server.
+		stop()
+	}()
+
+	addr := "本机"
+	if ips := server.LocalIPs(); len(ips) > 0 {
+		addr = fmt.Sprintf("%s:%d", ips[0], srv.Port())
+	}
+
+	var tray winui.Tray
+	items := []winui.MenuItem{
+		{Label: "打开教师端", Default: true, OnClick: func() {
+			openBrowser(srv.AdminURL())
+		}},
+		{Label: "显示运行窗口（含管理口令）", OnClick: func() {
+			winui.ShowConsole()
+		}},
+		{Label: "隐藏运行窗口", OnClick: func() {
+			winui.HideConsole()
+		}},
+		{Separator: true},
+		{Label: "退出", OnClick: func() {
+			stop()
+			if tray != nil {
+				tray.Stop()
+			}
+		}},
+	}
+
+	err := winui.Run("CodeRoom 判题服务端", items, func(t winui.Tray) {
+		tray = t
+		t.SetTooltip(fmt.Sprintf("CodeRoom 判题服务端\n学生端连接地址 %s", addr))
+		t.Notify("CodeRoom 判题服务端已启动",
+			fmt.Sprintf("学生端连接 %s。双击托盘图标打开教师端，右键可显示运行窗口或退出。", addr))
+		// The server stopping on its own (a port clash, say) has to take the
+		// icon with it, or the teacher is left with a tray icon for nothing.
+		go func() {
+			<-ctx.Done()
+			t.Stop()
+		}()
+	})
+	if err != nil {
+		// No icon: put the window back rather than leaving the teacher with a
+		// server they cannot see or stop. The server is already running in the
+		// goroutine above, so this still returns true - saying otherwise would
+		// have the caller start a second one on the same port.
+		logger.Printf("托盘图标创建失败，改为显示运行窗口：%v", err)
+		winui.ShowConsole()
+		if err := <-done; err != nil {
+			logger.Fatalf("服务端异常退出: %v", err)
+		}
+		logger.Println("服务端已停止")
+		return true
+	}
+
+	stop()
+	if err := <-done; err != nil {
+		logger.Printf("服务端异常退出: %v", err)
+	}
+	logger.Println("服务端已停止")
+	return true
 }
 
 func printBanner(srv *server.Server, dataDir string) {

@@ -228,6 +228,11 @@ Copy-Note (Join-Path $repo 'packaging\server-readme.txt') (Join-Path $serverDir 
 Copy-Item -LiteralPath (Join-Path $repo 'packaging\setup-firewall.cmd') `
           -Destination (Join-Path $serverDir '放行防火墙.cmd') -Force
 Copy-Note (Join-Path $repo 'packaging\client-readme.txt') (Join-Path $clientDir '读我.txt')
+# The last-resort escape from a stuck exam lock. The client hides its console
+# in normal use, so double-clicking the exe opens the UI rather than running a
+# flag; this gives the teacher something they can double-click instead.
+Copy-Item -LiteralPath (Join-Path $repo 'packaging\restore-guard.cmd') `
+          -Destination (Join-Path $clientDir '恢复考场管控.cmd') -Force
 
 # ---------------------------------------------------------------- 汇总
 
