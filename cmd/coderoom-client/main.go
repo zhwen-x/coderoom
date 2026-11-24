@@ -37,6 +37,8 @@ func main() {
 		"解除本机残留的考场管控（U盘/断网）后退出。考试异常中断时的手动恢复手段")
 	watchdog := flag.Int("watchdog", 0,
 		"内部使用：监视指定进程，其退出后立即解除本机管控")
+	restoreIfGone := flag.Int("restore-if-gone", -1,
+		"内部使用：由开机恢复任务调用；仅当应用管控的客户端已不存在时才恢复")
 	flag.Parse()
 
 	logFile, logger := openLogger(*dataDir)
@@ -49,6 +51,12 @@ func main() {
 	// normal path did not.
 	if *restore {
 		if err := client.RestoreOnly(*dataDir, logger.Printf); err != nil {
+			fatal(logger, "恢复失败: %v", err)
+		}
+		return
+	}
+	if *restoreIfGone >= 0 {
+		if err := client.RestoreIfOwnerGone(*dataDir, *restoreIfGone, logger.Printf); err != nil {
 			fatal(logger, "恢复失败: %v", err)
 		}
 		return

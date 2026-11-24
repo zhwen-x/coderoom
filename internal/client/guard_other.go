@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -36,7 +37,7 @@ func (nullEnforcer) snapshotFirewall() (firewallSnapshot, error) {
 }
 func (nullEnforcer) blockInternet([]string) error           { return errUnsupported }
 func (nullEnforcer) restoreFirewall(firewallSnapshot) error { return errUnsupported }
-func (nullEnforcer) installRecovery(string) error           { return errUnsupported }
+func (nullEnforcer) installRecovery(string, int) error      { return errUnsupported }
 func (nullEnforcer) removeRecovery(string) error            { return errUnsupported }
 
 func guardJournalPath(dataDir string) string {
@@ -57,7 +58,7 @@ func waitForProcessExit(ctx context.Context, pid int) {
 			if err != nil {
 				return
 			}
-			if err := p.Signal(os.Signal(nil)); err != nil {
+			if err := p.Signal(syscall.Signal(0)); err != nil {
 				return
 			}
 		}
@@ -65,3 +66,18 @@ func waitForProcessExit(ctx context.Context, pid int) {
 }
 
 func spawnWatchdog(string) (*os.Process, error) { return nil, errUnsupported }
+
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return p.Signal(syscall.Signal(0)) == nil
+}
+
+// rebootedSince has no portable implementation; the development build never
+// enforces anything, so nothing depends on the answer.
+func rebootedSince(int64) bool { return false }

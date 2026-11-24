@@ -45,9 +45,22 @@ import (
 // that would then "restore" the wrong things.
 const journalVersion = 1
 
-// recoveryTaskName is the scheduled task that puts a machine back after a
-// power cut. Its name is fixed so that any build can find and remove it.
-const recoveryTaskName = "CodeRoomRecovery"
+// The scheduled tasks that put a machine back without this process. Two of
+// them, because Windows will not accept one trigger that covers both cases:
+// schtasks rejects /RI on an ONSTART schedule, so the boot trigger and the
+// every-minute trigger have to be separate tasks.
+//
+//   - recoveryTaskName fires at startup, which is the power-cut case.
+//   - recoveryTickName fires every minute, which is the case where the
+//     client's whole process tree was killed and took the watchdog with it.
+//
+// Both run the same command, and it does nothing while the client that
+// applied the lock is still alive. Names are fixed so any build can find and
+// remove them.
+const (
+	recoveryTaskName = "CodeRoomRecovery"
+	recoveryTickName = "CodeRoomRecoveryTick"
+)
 
 // usbSnapshot is the USBSTOR service's start type before CodeRoom touched it.
 // 3 is the Windows default (manual start); 4 is disabled.
@@ -79,6 +92,10 @@ type journal struct {
 	ExamID    int64  `json:"exam_id"`
 	ExamName  string `json:"exam_name"`
 	StudentNo string `json:"student_no"`
+	// OwnerPID is the client process that applied this lock. The recovery
+	// task checks it before acting, so the task can repeat during an exam
+	// without unlocking a machine whose client is alive and well.
+	OwnerPID int `json:"owner_pid"`
 
 	// Original values, captured immediately before the corresponding change.
 	// A nil field means that control was never touched and must not be
@@ -109,9 +126,11 @@ type enforcer interface {
 	blockInternet(allowHosts []string) error
 	restoreFirewall(firewallSnapshot) error
 
-	// installRecovery registers something that will restore this machine at
-	// next boot even if no CodeRoom process ever runs again.
-	installRecovery(taskName string) error
+	// installRecovery registers something that will restore this machine even
+	// if no CodeRoom process ever runs on it again. ownerPID is the client
+	// that holds the lock, so the recovery can tell "still mid-exam" from
+	// "the client is gone".
+	installRecovery(taskName string, ownerPID int) error
 	removeRecovery(taskName string) error
 }
 
@@ -275,6 +294,7 @@ func (g *Guard) Apply(p protocol.Policy, info applyInfo) error {
 		ExamID:    info.ExamID,
 		ExamName:  info.ExamName,
 		StudentNo: info.StudentNo,
+		OwnerPID:  os.Getpid(),
 		Task:      recoveryTaskName,
 	}
 
@@ -300,7 +320,7 @@ func (g *Guard) Apply(p protocol.Policy, info applyInfo) error {
 	if err := g.writeJournal(j); err != nil {
 		return g.failed("写入恢复记录失败", err)
 	}
-	if err := g.d.enf.installRecovery(recoveryTaskName); err != nil {
+	if err := g.d.enf.installRecovery(recoveryTaskName, j.OwnerPID); err != nil {
 		_ = os.Remove(g.d.jrnlPath)
 		return g.failed("安装开机恢复任务失败", err)
 	}
@@ -521,6 +541,48 @@ func RestoreOnly(dataDir string, logf func(string, ...any)) error {
 	}
 	logf("已恢复：U 盘与网络设置均已还原。")
 	return nil
+}
+
+// RestoreIfOwnerGone is what the recovery task runs. It restores only when the
+// client that applied the lock is no longer there, so the task can repeat
+// every minute during an exam without unlocking a working machine.
+//
+// This is the layer that covers the one hole the child watchdog has: killing
+// the client's whole process tree takes the watchdog with it, and without this
+// the machine would stay locked until somebody rebooted it. A lock that
+// outlives its owner is the failure this milestone exists to prevent, so it
+// cannot depend on a process the same keystroke can kill.
+func RestoreIfOwnerGone(dataDir string, ownerPID int, logf func(string, ...any)) error {
+	g := newGuard(guardDeps{
+		enf:      newEnforcer(),
+		jrnlPath: guardJournalPath(dataDir),
+		logf:     logf,
+	})
+	j, err := g.readJournal()
+	if err != nil {
+		return err
+	}
+	if j.empty() {
+		return nil
+	}
+	pid := ownerPID
+	if pid == 0 {
+		pid = j.OwnerPID
+	}
+
+	// A reboot settles it without asking about the PID at all, and has to be
+	// checked first: after a restart that number may belong to something
+	// entirely unrelated, and believing it would leave the machine locked.
+	if rebootedSince(j.AppliedAt) {
+		logf("本机已重启，考试「%s」的管控无人认领，正在恢复", j.ExamName)
+	} else if pid > 0 && processAlive(pid) {
+		return nil // the client is still running this exam: leave it alone
+	} else {
+		logf("应用管控的客户端（pid %d）已不存在，正在恢复", pid)
+	}
+
+	g.applied = j
+	return g.Release("管控进程已消失")
 }
 
 // ---------------------------------------------------------------- watchdog

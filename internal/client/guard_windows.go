@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -245,7 +246,7 @@ func netshOutput(args ...string) (string, error) {
 // mid-exam. The journal survives on disk, but something has to read it, and
 // the client may not be launched for days. A SYSTEM task at boot needs no
 // student, no login and no network.
-func (w *winEnforcer) installRecovery(taskName string) error {
+func (w *winEnforcer) installRecovery(taskName string, ownerPID int) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("定位本程序路径: %w", err)
@@ -255,20 +256,45 @@ func (w *winEnforcer) installRecovery(taskName string) error {
 	}
 	// schtasks takes the command as one argument; the inner quotes are what
 	// survive a path with spaces, which "Program Files" guarantees.
-	action := fmt.Sprintf(`"%s" -restore`, exe)
-	return schtasks("/Create", "/TN", taskName, "/TR", action,
-		"/SC", "ONSTART", "/RU", "SYSTEM", "/RL", "HIGHEST", "/F")
+	action := fmt.Sprintf(`"%s" -restore-if-gone %d`, exe, ownerPID)
+
+	// At startup: the power-cut case.
+	if err := schtasks("/Create", "/TN", taskName, "/TR", action,
+		"/SC", "ONSTART", "/RU", "SYSTEM", "/RL", "HIGHEST", "/F"); err != nil {
+		return err
+	}
+	// Every minute: the case where the client's process tree was killed and
+	// took the watchdog with it. Repeating is safe because the command does
+	// nothing while the client that applied the lock is still alive.
+	if err := schtasks("/Create", "/TN", recoveryTickName, "/TR", action,
+		"/SC", "MINUTE", "/MO", "1", "/RU", "SYSTEM", "/RL", "HIGHEST", "/F"); err != nil {
+		_, _ = schtasksOutput("/Delete", "/TN", taskName, "/F")
+		return err
+	}
+	return nil
 }
 
 func (w *winEnforcer) removeRecovery(taskName string) error {
-	out, err := schtasksOutput("/Delete", "/TN", taskName, "/F")
+	var firstErr error
+	// Both are removed whatever the journal recorded, so an older journal that
+	// names only one cannot leave the other behind running every minute.
+	for _, name := range []string{taskName, recoveryTickName} {
+		if err := deleteTask(name); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func deleteTask(name string) error {
+	out, err := schtasksOutput("/Delete", "/TN", name, "/F")
 	if err == nil {
 		return nil
 	}
-	if _, qErr := schtasksOutput("/Query", "/TN", taskName); qErr != nil {
+	if _, qErr := schtasksOutput("/Query", "/TN", name); qErr != nil {
 		return nil // already gone, which is the state we wanted
 	}
-	return fmt.Errorf("删除计划任务 %s 失败: %w (%s)", taskName, err, strings.TrimSpace(out))
+	return fmt.Errorf("删除计划任务 %s 失败: %w (%s)", name, err, strings.TrimSpace(out))
 }
 
 func schtasks(args ...string) error {
@@ -300,6 +326,32 @@ func guardJournalPath(dataDir string) string {
 		return filepath.Join(pd, "CodeRoom", "guard.json")
 	}
 	return filepath.Join(dataDir, "guard.json")
+}
+
+// processAlive reports whether a PID is still running. A process that has
+// exited but whose handle is still open counts as gone.
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(h)
+	var code uint32
+	if err := windows.GetExitCodeProcess(h, &code); err != nil {
+		return false
+	}
+	return code == 259 // STILL_ACTIVE
+}
+
+// rebootedSince reports whether the machine has booted since the given moment.
+// After a restart the recorded owner PID means nothing - it may belong to an
+// unrelated process - so this is checked before the PID is trusted.
+func rebootedSince(ms int64) bool {
+	bootedAt := time.Now().Add(-windows.DurationSinceBoot())
+	return bootedAt.UnixMilli() > ms
 }
 
 // ----------------------------------------------------------------- watchdog

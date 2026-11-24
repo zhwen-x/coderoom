@@ -24,6 +24,7 @@ type fakeEnforcer struct {
 	rules       map[string]bool
 	tasks       map[string]bool
 	unavailable string
+	ownerPID    int
 
 	failOn map[string]error
 }
@@ -97,7 +98,8 @@ func (f *fakeEnforcer) restoreFirewall(s firewallSnapshot) error {
 	return nil
 }
 
-func (f *fakeEnforcer) installRecovery(name string) error {
+func (f *fakeEnforcer) installRecovery(name string, ownerPID int) error {
+	f.ownerPID = ownerPID
 	if err := f.record("installRecovery"); err != nil {
 		return err
 	}
@@ -533,4 +535,66 @@ func TestEmptyPolicyReleases(t *testing.T) {
 		t.Errorf("turning enforcement off did not unlock: usb=%d rules=%v tasks=%v",
 			h.enf.usbStart, h.enf.rules, h.enf.tasks)
 	}
+}
+
+// The recovery task repeats every minute during an exam, so it must be able to
+// tell "the client is working normally" from "the client is gone". Getting
+// this backwards would either unlock every machine mid-exam or leave a
+// tree-killed one locked until somebody rebooted it.
+func TestRecoveryTaskLeavesALiveClientAlone(t *testing.T) {
+	h := newGuardHarness(t)
+	if err := h.g.Apply(bothBlocked(), someInfo()); err != nil {
+		t.Fatal(err)
+	}
+	j, err := h.g.readJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.OwnerPID != os.Getpid() {
+		t.Fatalf("journal owner pid = %d, want this process %d", j.OwnerPID, os.Getpid())
+	}
+
+	// This process is the owner and is obviously alive.
+	if err := restoreIfGoneWith(h, os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	if !h.enf.locked() {
+		t.Error("recovery unlocked a machine whose client is still running")
+	}
+
+	// A PID that is not running stands in for the client having been killed.
+	if err := restoreIfGoneWith(h, deadPID(t)); err != nil {
+		t.Fatal(err)
+	}
+	if h.enf.locked() {
+		t.Errorf("recovery left the machine locked after its client vanished: usb=%d rules=%v tasks=%v",
+			h.enf.usbStart, h.enf.rules, h.enf.tasks)
+	}
+}
+
+// restoreIfGoneWith runs the task's decision against the harness's fake
+// enforcer rather than the real machine.
+func restoreIfGoneWith(h *guardHarness, pid int) error {
+	g := newGuard(guardDeps{enf: h.enf, jrnlPath: h.path, logf: h.g.d.logf})
+	j, err := g.readJournal()
+	if err != nil || j.empty() {
+		return err
+	}
+	if pid > 0 && processAlive(pid) {
+		return nil
+	}
+	g.applied = j
+	return g.Release("管控进程已消失")
+}
+
+// deadPID returns a process id that is certainly not running.
+func deadPID(t *testing.T) int {
+	t.Helper()
+	for pid := 400000; pid < 400100; pid++ {
+		if !processAlive(pid) {
+			return pid
+		}
+	}
+	t.Skip("找不到一个确定不存在的 pid")
+	return 0
 }
