@@ -51,8 +51,10 @@ type App struct {
 	focused        bool
 	foreground     string // live foreground app, from the OS monitor
 
-	mon *monitor
-	mux *http.ServeMux
+	mon      *monitor
+	guard    *Guard
+	watchdog *os.Process
+	mux      *http.ServeMux
 }
 
 func NewApp(dataDir string, discoveryPort int, logger *log.Logger) (*App, error) {
@@ -99,6 +101,18 @@ func NewApp(dataDir string, discoveryPort int, logger *log.Logger) (*App, error)
 		},
 		logf: logger.Printf,
 	})
+	a.guard = newGuard(guardDeps{
+		enf:      newEnforcer(),
+		jrnlPath: guardJournalPath(dataDir),
+		emit:     local.QueueEvent,
+		logf:     logger.Printf,
+	})
+	// Before anything else, including before the UI can be reached: a lock
+	// left behind by a crash or a power cut is undone now, not after a student
+	// logs in. The event it queues is delivered as soon as there is a session
+	// to attribute it to.
+	a.guard.SelfCheck()
+
 	a.routes()
 	return a, nil
 }
@@ -229,6 +243,10 @@ type uiState struct {
 	// student. A monitored exam says so: visible rules produce fewer disputes
 	// afterwards, and a hidden check deters nobody.
 	Monitors []string `json:"monitors"`
+	// Guard tells the student what has been changed on their machine. Finding
+	// out from a USB port that silently stopped working is how a support call
+	// starts; being told up front, and told it reverts, is how it does not.
+	Guard GuardStatus `json:"guard"`
 }
 
 func (a *App) snapshotUI() uiState {
@@ -270,6 +288,7 @@ func (a *App) snapshotUI() uiState {
 	if a.loggedIn {
 		st.Monitors = activeMonitors(a.policy)
 	}
+	st.Guard = a.guard.Status()
 	if a.up != nil {
 		st.ServerAddr = a.up.Addr()
 	}
@@ -448,6 +467,13 @@ func (a *App) hLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) hLogout(w http.ResponseWriter, r *http.Request) {
+	// Logging out ends this student's exam on this machine, so it ends the
+	// lock too - before the session is dropped, while the reason is still known.
+	if err := a.guard.Release("学生登出"); err != nil {
+		a.logger.Printf("登出时解除管控失败：%v", err)
+	}
+	a.stopWatchdog()
+
 	a.mu.Lock()
 	a.loggedIn = false
 	a.paper = nil
@@ -665,6 +691,7 @@ func (a *App) Run(ctx context.Context) {
 			if now.After(nextHeartbeat) {
 				nextHeartbeat = now.Add(hbEvery)
 				a.heartbeat(ctx)
+				a.syncGuard()
 				a.flushEvents(ctx)
 			}
 			if now.After(nextSnapshot) {
@@ -716,6 +743,14 @@ func (a *App) shutdownFlush() {
 			ClientTime: time.Now().UnixMilli(),
 		})
 	}
+	// The machine is unlocked before anything else is attempted. An upload
+	// that hangs must never be what keeps a student's USB disabled.
+	if err := a.guard.Release("客户端退出"); err != nil {
+		a.logger.Printf("退出时解除管控失败：%v —— "+
+			"开机恢复任务会在下次启动时再试，也可手动运行 coderoom-client.exe -restore", err)
+	}
+	a.stopWatchdog()
+
 	a.uploadDirtyDrafts(ctx)
 	a.flushEvents(ctx)
 
@@ -752,11 +787,16 @@ func (a *App) heartbeat(ctx context.Context) {
 	if up == nil {
 		return
 	}
+	gs := a.guard.Status()
 	res, err := up.Heartbeat(ctx, protocol.HeartbeatRequest{
 		ClientTime:    time.Now().UnixMilli(),
 		Focused:       a.isFocused(),
 		PolicyVersion: pv,
 		Foreground:    fg,
+		Guard: &protocol.GuardReport{
+			Supported: gs.Supported, Active: gs.Active,
+			USB: gs.USB, Internet: gs.Internet, Error: gs.LastError,
+		},
 	})
 	if err != nil {
 		a.noteError(err)
@@ -783,6 +823,83 @@ func (a *App) heartbeat(ctx context.Context) {
 	// sitting on a locked paper re-fetches as soon as the state moves.
 	if wasLocked && res.ExamState == protocol.ExamStateRunning {
 		a.refreshPaper(ctx)
+	}
+}
+
+// syncGuard brings enforcement into line with the current policy and exam
+// state, on every heartbeat.
+//
+// Driving it from the heartbeat rather than from a one-off event is what makes
+// it converge: a machine that was asleep when the teacher turned enforcement
+// on picks it up on its next beat, and - far more importantly - a machine
+// whose exam has ended, whose policy changed, or whose student logged out
+// unlocks itself without anyone having to send it anything.
+func (a *App) syncGuard() {
+	a.mu.RLock()
+	loggedIn, policy, state := a.loggedIn, a.policy, a.exam.State
+	info := applyInfo{ExamID: a.exam.ID, ExamName: a.exam.Name, StudentNo: a.local.State().StudentNo}
+	var deadline *int64
+	if a.paper != nil {
+		deadline = a.paper.Deadline
+	}
+	a.mu.RUnlock()
+
+	// Enforcement belongs to a running exam and nothing else. Published but
+	// not started, ended, judging, graded, logged out: all release.
+	want := loggedIn && state == protocol.ExamStateRunning &&
+		(policy.BlockUSBStorage || policy.BlockInternet)
+
+	// Past the deadline, release even though the client still believes the
+	// exam is running. This is the one unlock that needs no server at all: if
+	// the server dies mid-exam the client can never be told the exam ended,
+	// and without this the machine would stay locked until someone closed the
+	// client. The deadline came from the server originally, so the student's
+	// own clock cannot bring it forward.
+	if want && deadline != nil && a.ServerTime() > *deadline {
+		a.logger.Printf("已过交卷时间，解除管控")
+		want = false
+	}
+	if !want {
+		if err := a.guard.Release("策略或考试状态不再要求管控"); err != nil {
+			a.logger.Printf("解除管控失败：%v", err)
+		}
+		a.stopWatchdog()
+		return
+	}
+	if err := a.guard.Apply(policy, info); err != nil {
+		a.logger.Printf("应用管控失败：%v", err)
+		return
+	}
+	a.startWatchdog()
+}
+
+// startWatchdog launches the process that will unlock this machine if the
+// client is killed. It is started only once a lock is actually held, so a
+// client that never enforces never spawns one.
+func (a *App) startWatchdog() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.watchdog != nil {
+		return
+	}
+	p, err := spawnWatchdog(a.dataDir)
+	if err != nil {
+		// Not fatal: three other layers still unlock this machine. But the
+		// teacher should know this one is missing.
+		a.logger.Printf("看门狗启动失败（强杀客户端后将依赖开机恢复任务）：%v", err)
+		return
+	}
+	a.watchdog = p
+	a.logger.Printf("看门狗已启动 (pid %d)", p.Pid)
+}
+
+func (a *App) stopWatchdog() {
+	a.mu.Lock()
+	p := a.watchdog
+	a.watchdog = nil
+	a.mu.Unlock()
+	if p != nil {
+		_ = p.Kill()
 	}
 }
 

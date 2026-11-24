@@ -131,6 +131,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   -- Latch so a lost heartbeat is reported once per episode, not once per
   -- sweep. Cleared by the next heartbeat that arrives.
   offline_alerted   INTEGER NOT NULL DEFAULT 0,
+  -- M4: what the client reports it is actually enforcing, which is not the
+  -- same as what the policy asked for. One JSON blob rather than five
+  -- columns; nothing queries its fields, the dashboard just renders them.
+  guard_json        TEXT NOT NULL DEFAULT '{}',
   UNIQUE(exam_id, student_no)
 );
 

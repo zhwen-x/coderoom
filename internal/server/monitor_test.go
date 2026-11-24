@@ -144,23 +144,111 @@ func TestAnAllOffPolicySurvivesTheRoundTrip(t *testing.T) {
 	}
 }
 
-// The enforcement flags exist on the wire so M4 needs no protocol change, but
-// nothing implements them. Accepting one would leave a teacher believing USB
-// storage is disabled when it is not - worse than having no such switch.
-func TestEnforcementFlagsCannotBeTurnedOnYet(t *testing.T) {
+// From M4 the enforcement flags are honoured and reach the client. AllowedHosts
+// is still cleared: nothing reads it, and a list that looks like it grants
+// exceptions while granting none is worse than no list at all.
+func TestEnforcementFlagsReachTheClient(t *testing.T) {
 	h := newHarness(t)
 	_, examID := h.seedExam()
+	login := h.login(examID, "2023", "张三", "")
 
 	var saved protocol.Policy
 	status, raw := h.do(http.MethodPut, "/api/teacher/exams/"+itoa(examID)+"/policy",
 		map[string]any{
 			"block_usb_storage": true, "block_internet": true,
-			"allowed_hosts": []string{"192.168.1.10"},
+			"allowed_hosts": []string{"203.0.113.9"},
 		}, true)
 	h.mustJSON(status, raw, &saved)
 
-	if saved.BlockUSBStorage || saved.BlockInternet || len(saved.AllowedHosts) > 0 {
-		t.Errorf("enforcement accepted before it exists: %+v", saved)
+	if !saved.BlockUSBStorage || !saved.BlockInternet {
+		t.Errorf("enforcement not saved: %+v", saved)
+	}
+	if len(saved.AllowedHosts) > 0 {
+		t.Errorf("allowed_hosts kept although nothing applies it: %v", saved.AllowedHosts)
+	}
+
+	var hb protocol.HeartbeatResponse
+	status, raw = h.do(http.MethodPost, "/api/client/heartbeat",
+		protocol.HeartbeatRequest{PolicyVersion: login.PolicyVersion}, false)
+	h.mustJSON(status, raw, &hb)
+	if hb.Policy == nil || !hb.Policy.BlockUSBStorage || !hb.Policy.BlockInternet {
+		t.Fatalf("client not handed the enforcement policy: %+v", hb.Policy)
+	}
+}
+
+// The emergency escape has to use the same path as every other policy change,
+// so that there is no second mechanism to be the broken one on the day it is
+// needed.
+func TestEmergencyReleaseUnlocksEveryClient(t *testing.T) {
+	h := newHarness(t)
+	_, examID := h.seedExam()
+	h.login(examID, "2023", "张三", "")
+
+	// A PUT replaces the whole policy, so the monitoring half has to be sent
+	// alongside - exactly as the console's form does.
+	status, raw := h.do(http.MethodPut, "/api/teacher/exams/"+itoa(examID)+"/policy",
+		map[string]any{
+			"block_usb_storage": true, "block_internet": true,
+			"monitor_usb": true, "monitor_process": true,
+			"process_blacklist": []string{"chrome"},
+		}, true)
+	h.mustJSON(status, raw, nil)
+
+	status, raw = h.do(http.MethodPost,
+		"/api/teacher/exams/"+itoa(examID)+"/release-guard", nil, true)
+	h.mustJSON(status, raw, nil)
+
+	// A client on any older version is handed a policy with nothing enforced.
+	var hb protocol.HeartbeatResponse
+	status, raw = h.do(http.MethodPost, "/api/client/heartbeat",
+		protocol.HeartbeatRequest{PolicyVersion: 1}, false)
+	h.mustJSON(status, raw, &hb)
+	if hb.Policy == nil {
+		t.Fatal("stale client not handed the released policy")
+	}
+	if hb.Policy.BlockUSBStorage || hb.Policy.BlockInternet {
+		t.Errorf("emergency release left enforcement on: %+v", hb.Policy)
+	}
+	// Monitoring is untouched: releasing the locks must not also blind the
+	// invigilator for the rest of the exam.
+	if !hb.Policy.MonitorUSB || !hb.Policy.MonitorProcess {
+		t.Errorf("release also turned monitoring off: %+v", hb.Policy)
+	}
+}
+
+// What the teacher sees must be what the machine reports, not what the policy
+// asked for. A client that cannot elevate has to be visibly different from one
+// that locked down successfully.
+func TestDashboardShowsWhatIsActuallyEnforced(t *testing.T) {
+	h := newHarness(t)
+	_, examID := h.seedExam()
+	h.login(examID, "2023", "张三", "")
+
+	status, raw := h.do(http.MethodPost, "/api/client/heartbeat",
+		protocol.HeartbeatRequest{Guard: &protocol.GuardReport{
+			Supported: false, Error: "客户端没有管理员权限",
+		}}, false)
+	h.mustJSON(status, raw, nil)
+
+	var views []sessionView
+	status, raw = h.do(http.MethodGet, "/api/teacher/exams/"+itoa(examID)+"/sessions", nil, true)
+	h.mustJSON(status, raw, &views)
+	if len(views) != 1 || views[0].Guard == nil {
+		t.Fatalf("guard state not surfaced: %+v", views)
+	}
+	if views[0].Guard.Supported || views[0].Guard.Error == "" {
+		t.Errorf("a machine that cannot enforce does not look different: %+v", views[0].Guard)
+	}
+
+	status, raw = h.do(http.MethodPost, "/api/client/heartbeat",
+		protocol.HeartbeatRequest{Guard: &protocol.GuardReport{
+			Supported: true, Active: true, USB: true, Internet: true,
+		}}, false)
+	h.mustJSON(status, raw, nil)
+	status, raw = h.do(http.MethodGet, "/api/teacher/exams/"+itoa(examID)+"/sessions", nil, true)
+	h.mustJSON(status, raw, &views)
+	if g := views[0].Guard; g == nil || !g.Active || !g.USB || !g.Internet {
+		t.Errorf("locked machine not shown as locked: %+v", views[0].Guard)
 	}
 }
 

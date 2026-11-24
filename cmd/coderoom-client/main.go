@@ -33,11 +33,31 @@ func main() {
 	// Headless mode keeps the local API and background loops running without
 	// opening a window. Used for diagnostics and automated testing.
 	noWindow := flag.Bool("no-window", false, "不打开界面窗口，仅运行本地服务（诊断/测试用）")
+	restore := flag.Bool("restore", false,
+		"解除本机残留的考场管控（U盘/断网）后退出。考试异常中断时的手动恢复手段")
+	watchdog := flag.Int("watchdog", 0,
+		"内部使用：监视指定进程，其退出后立即解除本机管控")
 	flag.Parse()
 
 	logFile, logger := openLogger(*dataDir)
 	if logFile != nil {
 		defer logFile.Close()
+	}
+
+	// Both of these run before anything else is set up: they need no server,
+	// no login and no window, and the whole point of them is working when the
+	// normal path did not.
+	if *restore {
+		if err := client.RestoreOnly(*dataDir, logger.Printf); err != nil {
+			fatal(logger, "恢复失败: %v", err)
+		}
+		return
+	}
+	if *watchdog > 0 {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		client.WatchParent(ctx, *watchdog, *dataDir, logger.Printf)
+		return
 	}
 
 	app, err := client.NewApp(*dataDir, *discoveryPort, logger)

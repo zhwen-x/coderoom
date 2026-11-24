@@ -114,6 +114,9 @@ var addedColumns = []addedColumn{
 	{"sessions", "focused", "INTEGER NOT NULL DEFAULT 1"},
 	{"sessions", "foreground", "TEXT NOT NULL DEFAULT ''"},
 	{"sessions", "offline_alerted", "INTEGER NOT NULL DEFAULT 0"},
+
+	// M4: the client's own account of what it is enforcing on its machine.
+	{"sessions", "guard_json", "TEXT NOT NULL DEFAULT '{}'"},
 }
 
 func (s *Store) addColumns() error {

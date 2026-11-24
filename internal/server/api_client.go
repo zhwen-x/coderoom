@@ -457,7 +457,7 @@ func (s *Server) handleClientHeartbeat(w http.ResponseWriter, r *http.Request, s
 	}
 	// The heartbeat carries what the student is looking at, not just that the
 	// client is alive, so the dashboard has a live view that costs no events.
-	if err := s.st.RecordClientState(r.Context(), sess.ID, req.Focused, req.Foreground); err != nil {
+	if err := s.st.RecordClientState(r.Context(), sess.ID, req.Focused, req.Foreground, req.Guard); err != nil {
 		s.logger.Printf("heartbeat: %v", err)
 	}
 	s.checkClockSkew(r, sess, req.ClientTime)

@@ -218,6 +218,7 @@ func (s *Server) routes() {
 	mux.HandleFunc("GET /api/teacher/exams/{id}/scores", s.admin(s.handleExamScores))
 	mux.HandleFunc("GET /api/teacher/exams/{id}/scores.csv", s.admin(s.handleExamScoresCSV))
 	mux.HandleFunc("PUT /api/teacher/exams/{id}/policy", s.admin(s.handleSetExamPolicy))
+	mux.HandleFunc("POST /api/teacher/exams/{id}/release-guard", s.admin(s.handleReleaseGuard))
 	mux.HandleFunc("GET /api/teacher/exams/{id}/events", s.admin(s.handleExamEvents))
 	mux.HandleFunc("GET /api/teacher/exams/{id}/stream", s.admin(s.handleExamStream))
 	mux.HandleFunc("GET /api/teacher/exams/{id}/reconcile", s.admin(s.handleReconcile))

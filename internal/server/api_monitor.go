@@ -91,14 +91,12 @@ func (s *Server) handleSetExamPolicy(w http.ResponseWriter, r *http.Request) {
 
 // sanitizePolicy bounds what a teacher can save.
 //
-// The enforcement flags are forced off, not rejected. They are part of the
-// wire format already so that M4 needs no protocol change, but nothing
-// implements them yet - and a checkbox that claims to disable USB storage and
-// silently does nothing is worse than no checkbox at all. The UI does not
-// offer them; this is the backstop for anything that calls the API directly.
+// The enforcement flags are honoured from M4 on. AllowedHosts is still cleared
+// because nothing reads it: the client permits the whole local network by
+// construction, which already covers the judge server and the classroom
+// software, and a list that looks like it grants exceptions while granting
+// none is worse than no list.
 func sanitizePolicy(p protocol.Policy) protocol.Policy {
-	p.BlockUSBStorage = false
-	p.BlockInternet = false
 	p.AllowedHosts = nil
 
 	p.SnapshotIntervalSec = clampInt(p.SnapshotIntervalSec, 10, 600, 30)
@@ -157,12 +155,51 @@ func monitorSummary(p protocol.Policy) []string {
 		{p.MonitorUSB, "usb"}, {p.MonitorProcess, "process"},
 		{p.MonitorForeground, "foreground"}, {p.MonitorPaste, "paste"},
 		{p.MonitorNetwork, "network"},
+		{p.BlockUSBStorage, "block_usb"}, {p.BlockInternet, "block_internet"},
 	} {
 		if c.on {
 			out = append(out, c.name)
 		}
 	}
 	return out
+}
+
+// handleReleaseGuard is the emergency escape: drop every lock in this exam,
+// now.
+//
+// It works by turning the enforcement flags off and bumping the policy
+// version, which is the same path every other policy change takes - so there
+// is no second mechanism that might be the broken one on the day it is needed.
+// Every client unlocks on its next heartbeat, including machines that were
+// asleep or rebooting when the button was pressed.
+//
+// For a single machine whose client is gone, the escape is local and needs no
+// server: coderoom-client.exe -restore.
+func (s *Server) handleReleaseGuard(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "id")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_id", "考试 ID 无效")
+		return
+	}
+	exam, err := s.st.GetExam(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "考试不存在")
+		return
+	}
+	p := exam.Policy
+	p.BlockUSBStorage = false
+	p.BlockInternet = false
+	version, err := s.st.SetExamPolicy(r.Context(), id, sanitizePolicy(p))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db_error", err.Error())
+		return
+	}
+	s.audit(r, "exam.release_guard", fmt.Sprint(id), map[string]any{"version": version})
+	s.logger.Printf("已对考试 %d 下发全局解除管控（策略 v%d）", id, version)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "policy_version": version,
+		"message": "已解除；各学生机将在下一次心跳（默认 10 秒内）自动恢复 U 盘与网络。",
+	})
 }
 
 // ---------------------------------------------------------------- dashboard

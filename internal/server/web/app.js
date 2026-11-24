@@ -299,6 +299,16 @@ function examControlPanel() {
 
 // ------------------------------------------------------------ monitor policy
 
+// Enforcement is kept visually and textually apart from monitoring: these two
+// change the student's machine, and the teacher has to understand that before
+// ticking them, not after a room full of machines behaves oddly.
+const ENFORCE_FIELDS = [
+  ['block_usb_storage', '禁用 U 盘存储',
+    '考试期间停止加载 USB 存储驱动。已经插着的 U 盘不会被弹出（驱动已加载），拔掉后才无法再用。'],
+  ['block_internet', '禁止访问外网',
+    '只封锁公网地址；局域网全部放通，判题服务端、极域、文件共享照常可用。'],
+];
+
 const MONITOR_FIELDS = [
   ['monitor_usb', 'U盘/存储设备', '出现或移走一个可用的驱动器盘符时上报'],
   ['monitor_process', '黑名单进程', '浏览器、聊天工具、远程控制软件在运行就上报'],
@@ -310,26 +320,50 @@ const MONITOR_FIELDS = [
 function policyRow(e) {
   const p = e.policy || {};
   const on = MONITOR_FIELDS.filter(([k]) => p[k]).map(([, label]) => label);
-  return el('div', { class: 'row' },
-    el('strong', {}, '监控策略'),
-    on.length
-      ? el('span', {}, on.join(' · '))
-      : el('span', { class: 'muted' }, '全部关闭'),
-    el('span', { class: 'muted' }, `v${e.policy_version || 1}`),
-    el('button', { onclick: () => openPolicyEditor(e) }, '编辑'),
-  );
+  const blocking = ENFORCE_FIELDS.filter(([k]) => p[k]).map(([, label]) => label);
+  return el('div', {},
+    el('div', { class: 'row' },
+      el('strong', {}, '监控策略'),
+      on.length ? el('span', {}, on.join(' · ')) : el('span', { class: 'muted' }, '全部关闭'),
+      el('span', { class: 'muted' }, `v${e.policy_version || 1}`),
+      el('button', { onclick: () => openPolicyEditor(e) }, '编辑')),
+    el('div', { class: 'row' },
+      el('strong', {}, '强制管控'),
+      blocking.length
+        ? el('span', { class: 'err' }, blocking.join(' · '))
+        : el('span', { class: 'muted' }, '未启用'),
+      blocking.length
+        ? el('button', {
+            class: 'danger',
+            title: '立即让全班学生机恢复 U 盘与网络',
+            onclick: async () => {
+              if (!confirm(
+                `立即解除「${e.name}」的全部强制管控？\n\n` +
+                '所有学生机会在下一次心跳（默认 10 秒内）恢复 U 盘与网络访问。\n' +
+                '监控不受影响，考试可以继续。')) return;
+              try {
+                const r = await api(`/exams/${e.id}/release-guard`, { method: 'POST' });
+                await refreshExams(); render();
+                toast(r.message || '已解除');
+              } catch (err) { toast(err.message, true); }
+            },
+          }, '紧急解除管控')
+        : null));
 }
 
 function openPolicyEditor(e) {
   const p = JSON.parse(JSON.stringify(e.policy || {}));
-  const boxes = MONITOR_FIELDS.map(([key, label, hint]) => {
+  const makeBox = ([key, label, hint], strong) => {
     const cb = el('input', { type: 'checkbox' });
     cb.checked = !!p[key];
     cb._key = key;
     return el('div', {},
-      el('label', { class: 'row' }, cb, el('strong', {}, label)),
+      el('label', { class: 'row' }, cb,
+        el('strong', { class: strong ? 'err' : null }, label)),
       el('div', { class: 'muted small' }, hint));
-  });
+  };
+  const boxes = MONITOR_FIELDS.map((f) => makeBox(f, false));
+  const enforceBoxes = ENFORCE_FIELDS.map((f) => makeBox(f, true));
 
   const black = el('textarea', { rows: '6' });
   black.value = (p.process_blacklist || []).join('\n');
@@ -355,16 +389,24 @@ function openPolicyEditor(e) {
     el('div', { class: 'grid2' },
       el('label', {}, '代码快照间隔（秒）', snap),
       el('label', {}, '心跳间隔（秒）', beat)),
+    el('hr'),
+    el('div', { class: 'row' }, el('h3', {}, '强制管控'),
+      el('span', { class: 'err' }, '会修改学生机的系统设置')),
+    el('div', { class: 'grid2' }, enforceBoxes),
     el('p', { class: 'warn small' },
-      '本版本只检测、不拦截。禁用 U 盘与断网需要管理员权限和一套能在客户端崩溃后' +
-      '恢复系统设置的看门狗，属于 M4，所以这里不提供对应开关——' +
-      '给出一个点了却不生效的开关比没有这个开关更糟。'),
+      '需要学生端以管理员身份运行。没有管理员权限的机器不会被管控，' +
+      '并会在监考看板上标红——不会假装成功。'),
+    el('p', { class: 'muted small' },
+      '恢复有五重保障：考试结束/登出/退出自动恢复；客户端被强杀由看门狗恢复；' +
+      '断电重启由开机计划任务恢复；教师可在上方「紧急解除管控」一键解除；' +
+      '最后还可在学生机上运行 coderoom-client.exe -restore 手动恢复。' +
+      '所有失败路径都是「恢复」，不会把机器锁死。'),
   ], [
     el('button', { onclick: closeModal }, '取消'),
     el('button', {
       onclick: () => {
         const d = ((S.system || {}).default_policy || {})[e.type] || {};
-        boxes.forEach((b) => {
+        [...boxes, ...enforceBoxes].forEach((b) => {
           const cb = b.querySelector('input');
           cb.checked = !!d[cb._key];
         });
@@ -381,7 +423,7 @@ function openPolicyEditor(e) {
           process_blacklist: lines(black),
           process_whitelist: lines(white),
         };
-        boxes.forEach((b) => {
+        [...boxes, ...enforceBoxes].forEach((b) => {
           const cb = b.querySelector('input');
           body[cb._key] = cb.checked;
         });
@@ -815,7 +857,7 @@ function viewMonitor() {
         alerts ? el('span', { class: 'err' }, `${alerts} 人有告警`) : null),
       sessions.length ? el('div', { class: 'scroll' }, el('table', {},
         el('thead', {}, el('tr', {},
-          ...['', '学号', '姓名', '班级', '机器', '当前前台', '事件', '最后心跳', '交卷']
+          ...['', '学号', '姓名', '班级', '机器', '当前前台', '管控', '事件', '最后心跳', '交卷']
             .map((h) => el('th', {}, h)))),
         el('tbody', {}, sessions.map((x) => el('tr', {
           class: S.focusStudent === x.student_no ? 'row-sel' : null,
@@ -832,6 +874,7 @@ function viewMonitor() {
           el('td', {}, x.student_no), el('td', {}, x.name), el('td', {}, x.class || '-'),
           el('td', {}, x.machine_name || '-'),
           el('td', {}, foregroundCell(x)),
+          el('td', {}, guardCell(x)),
           el('td', {}, tallyCell(x.events)),
           el('td', {}, x.online ? '正常'
             : el('span', { class: 'warn' }, `失联 ${fmtDur(x.silent_for_ms)}`)),
@@ -873,6 +916,25 @@ function foregroundCell(x) {
     return el('span', { class: 'muted' }, x.focused ? '本窗口' : '未知');
   }
   return el('span', { class: x.focused ? 'muted' : 'warn' }, x.foreground);
+}
+
+// guardCell shows what the machine reports it is enforcing, which is the only
+// thing that counts. A policy saying "USB disabled" tells the teacher what was
+// asked for; this column tells them whether it happened.
+function guardCell(x) {
+  const g = x.guard;
+  if (!g) return el('span', { class: 'muted' }, '-');
+  if (!g.supported) {
+    return el('span', { class: 'err', title: g.error || '该机无法执行管控' }, '无法管控');
+  }
+  if (g.error) {
+    return el('span', { class: 'err', title: g.error }, '管控出错');
+  }
+  if (!g.active) return el('span', { class: 'muted' }, '未管控');
+  const parts = [];
+  if (g.usb_blocked) parts.push('禁U盘');
+  if (g.internet_blocked) parts.push('断外网');
+  return el('span', { class: 'ok' }, parts.join(' · '));
 }
 
 function tallyCell(t) {

@@ -84,6 +84,25 @@ const (
 	// cannot perform. Without it, a monitor that silently fails looks exactly
 	// like a room where nobody cheated.
 	EvMonitorDegraded = "monitor_degraded"
+
+	// Enforcement (M4). A teacher has to be able to tell, per machine,
+	// whether the lock they asked for is actually in force - and must be told
+	// when one was left behind by a crash, because that is a machine somebody
+	// may have found unusable.
+	EvGuardApplied     = "guard_applied"
+	EvGuardReleased    = "guard_released"
+	EvGuardFailed      = "guard_failed"
+	EvGuardUnavailable = "guard_unavailable"
+	EvGuardRecovered   = "guard_recovered"
+)
+
+// Command types on the server -> client control channel.
+const (
+	// CmdReleaseGuard is the teacher's emergency escape: drop every lock on
+	// this machine now, whatever the policy says. It exists because the one
+	// failure this system must never have is a room full of machines nobody
+	// can use and no way to intervene.
+	CmdReleaseGuard = "release_guard"
 )
 
 // Envelope is embedded in every client-facing response.
@@ -324,6 +343,19 @@ type HeartbeatRequest struct {
 	// present, so the dashboard can answer "is he still in there?" without
 	// replaying the event log.
 	Foreground string `json:"foreground"`
+	// Guard is what is actually enforced on this machine, which is not the
+	// same thing as what the policy asked for. A teacher must be able to see
+	// the difference before the exam, not deduce it from the results after.
+	Guard *GuardReport `json:"guard,omitempty"`
+}
+
+// GuardReport is the client's account of enforcement on its own machine.
+type GuardReport struct {
+	Supported bool   `json:"supported"`
+	Active    bool   `json:"active"`
+	USB       bool   `json:"usb_blocked"`
+	Internet  bool   `json:"internet_blocked"`
+	Error     string `json:"error,omitempty"`
 }
 
 type HeartbeatResponse struct {

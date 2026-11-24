@@ -444,6 +444,15 @@ function renderStatus() {
       title: '本场启用的考场监控：' + st.monitors.join('、') + '。详见「更多」。',
     }, '监考中'));
   }
+  const g = st.guard || {};
+  if (g.active) {
+    const what = [g.usb_blocked ? 'U 盘' : null, g.internet_blocked ? '外网' : null]
+      .filter(Boolean).join('、');
+    bits.push(el('span', {
+      class: 'warn',
+      title: `考试期间本机已临时禁用：${what}。考试结束或关闭本程序后自动恢复。`,
+    }, '已管控'));
+  }
   sync.replaceChildren(...bits);
   sync.title = st.last_error || '与服务端同步正常';
 
@@ -503,6 +512,7 @@ $('#btn-menu').addEventListener('click', () => {
           '监控只记录并上报，不会阻止你做任何操作，也不读取你的文件内容。' +
           '代码靠粘贴录入，所以剪贴板不会被禁用。')
       : el('div', { class: 'muted small' }, '本场未启用考场监控。'),
+    guardNote(st.guard || {}),
     st.last_error ? el('div', { class: 'err small' }, st.last_error) : null,
     el('hr'),
     el('div', { class: 'row' },
@@ -566,6 +576,19 @@ function stopPolling() {
   clearInterval(S.pollTimer);
   clearInterval(S.clockTimer);
   S.pollTimer = S.clockTimer = null;
+}
+
+// guardNote tells the student exactly what was changed on this machine and
+// when it goes back. Saying so plainly is both fairer and cheaper than letting
+// them discover it from a USB port that stopped working.
+function guardNote(g) {
+  if (!g.active) return null;
+  const what = [g.usb_blocked ? 'U 盘存储' : null, g.internet_blocked ? '外网访问' : null]
+    .filter(Boolean).join('、');
+  return el('div', { class: 'warn small' },
+    `本场考试已临时禁用本机的 ${what}。局域网与本程序不受影响。` +
+    '考试结束、交卷登出或关闭本程序后会自动恢复；' +
+    '即使程序被强行结束或机器断电，重启后也会自动恢复。');
 }
 
 // Window focus is reported so the teacher can see a student switching away.

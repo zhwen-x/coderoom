@@ -5,8 +5,11 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strings"
+
+	"coderoom/internal/protocol"
 )
 
 type Student struct {
@@ -100,6 +103,10 @@ type Session struct {
 	// now, which is the question an invigilator walking the room is asking.
 	Focused    bool   `json:"focused"`
 	Foreground string `json:"foreground"`
+	// Guard is what this machine reports it is actually enforcing. Nil means
+	// the client has not said yet - which for an exam that asked for
+	// enforcement is itself worth showing.
+	Guard *protocol.GuardReport `json:"guard"`
 }
 
 func newToken() (string, error) {
@@ -186,7 +193,7 @@ func (s *Store) Login(ctx context.Context, sess *Session) (*LoginResult, error) 
 
 const sessionCols = `id, exam_id, student_no, name, class, machine_name, ip, mac, os,
 	client_version, token, paper_id, login_at, last_heartbeat_at, submitted_at,
-	focused, foreground`
+	focused, foreground, guard_json`
 
 // sessionColsPrefixed is the same list qualified for a query that joins, where
 // a bare column name would be ambiguous.
@@ -201,13 +208,20 @@ var sessionColsPrefixed = func() string {
 func scanSession(sc interface{ Scan(...any) error }) (*Session, error) {
 	var x Session
 	var focused int
+	var guardJSON string
 	err := sc.Scan(&x.ID, &x.ExamID, &x.StudentNo, &x.Name, &x.Class, &x.MachineName,
 		&x.IP, &x.MAC, &x.OS, &x.ClientVersion, &x.Token, &x.PaperID,
-		&x.LoginAt, &x.LastHeartbeatAt, &x.SubmittedAt, &focused, &x.Foreground)
+		&x.LoginAt, &x.LastHeartbeatAt, &x.SubmittedAt, &focused, &x.Foreground, &guardJSON)
 	if err != nil {
 		return nil, err
 	}
 	x.Focused = focused != 0
+	if guardJSON != "" && guardJSON != "{}" {
+		var g protocol.GuardReport
+		if json.Unmarshal([]byte(guardJSON), &g) == nil {
+			x.Guard = &g
+		}
+	}
 	return &x, nil
 }
 
@@ -257,13 +271,19 @@ func (s *Store) Heartbeat(ctx context.Context, sessionID int64) error {
 }
 
 // RecordClientState is the heartbeat plus what the client reported about the
-// student's screen.
+// student's screen and about the controls it is enforcing.
 func (s *Store) RecordClientState(ctx context.Context, sessionID int64,
-	focused bool, foreground string) error {
+	focused bool, foreground string, guard *protocol.GuardReport) error {
+	blob := "{}"
+	if guard != nil {
+		if raw, err := json.Marshal(guard); err == nil {
+			blob = string(raw)
+		}
+	}
 	_, err := s.exec(ctx, `
 		UPDATE sessions SET last_heartbeat_at=?, offline_alerted=0,
-		  focused=?, foreground=? WHERE id=?`,
-		NowMS(), b2i(focused), foreground, sessionID)
+		  focused=?, foreground=?, guard_json=? WHERE id=?`,
+		NowMS(), b2i(focused), foreground, blob, sessionID)
 	return err
 }
 
