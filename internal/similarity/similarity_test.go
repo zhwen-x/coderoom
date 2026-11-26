@@ -287,3 +287,33 @@ func TestWinnowingActuallySamples(t *testing.T) {
 	}
 	t.Logf("%d 个 token -> %d 个指纹（%d 个 k-gram）", d.Tokens, len(d.Fingerprints), grams)
 }
+
+// Students submit from Windows machines, and the same program arriving with
+// CRLF line endings must not look like a different one. The tokenizer treats
+// \r as whitespace, but that is an easy thing to lose in a later edit and the
+// failure would be invisible: two identical answers simply stop matching.
+func TestLineEndingsDoNotAffectTheComparison(t *testing.T) {
+	lf := bubbleCPP
+	crlf := strings.ReplaceAll(lf, "\n", "\r\n")
+	cr := strings.ReplaceAll(lf, "\n", "\r")
+
+	base := analyse(t, "lf", "cpp", lf)
+	for name, variant := range map[string]string{"CRLF": crlf, "CR": cr} {
+		d := analyse(t, name, "cpp", variant)
+		if d.Tokens != base.Tokens {
+			t.Errorf("%s 的 token 数为 %d，LF 为 %d", name, d.Tokens, base.Tokens)
+		}
+		if m := Compare(base, d); m.Score != 100 {
+			t.Errorf("同一份代码换成 %s 行尾后相似度只有 %d%%", name, m.Score)
+		}
+	}
+}
+
+// Likewise a UTF-8 BOM, which Windows editors add silently when saving.
+func TestLeadingBOMDoesNotAffectTheComparison(t *testing.T) {
+	base := analyse(t, "plain", "cpp", bubbleCPP)
+	withBOM := analyse(t, "bom", "cpp", "\ufeff"+bubbleCPP)
+	if m := Compare(base, withBOM); m.Score != 100 {
+		t.Errorf("带 BOM 的同一份代码相似度只有 %d%%", m.Score)
+	}
+}
