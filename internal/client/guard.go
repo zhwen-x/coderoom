@@ -32,12 +32,16 @@ import (
 //     running. Deciding whether a leftover lock is "still legitimate" would
 //     need the network, which is exactly what may be missing.
 //
-// Five independent layers undo a lock, so that no single failure strands a
+// Five independent paths undo a lock, so that no single failure strands a
 // machine:
 //
-//  1. normal release - exam ends, student logs out, policy changes, client exits
+//  1. normal release - exam ends, student logs out, policy changes, client
+//     exits, or the deadline passes. That last one is the only unlock that
+//     needs no server at all: the deadline came from the server originally,
+//     so a server that dies mid-exam cannot leave a machine locked.
 //  2. watchdog - a child process that restores when its parent dies
-//  3. boot recovery - a scheduled task that restores at startup, as SYSTEM
+//  3. scheduled tasks as SYSTEM - one at boot for the power-cut case, one
+//     every minute for a process-tree kill that took the watchdog with it
 //  4. teacher override - the server's emergency release command
 //  5. the documented manual escape: coderoom-client.exe -restore
 
