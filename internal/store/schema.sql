@@ -31,6 +31,9 @@ CREATE TABLE IF NOT EXISTS problems (
   tags            TEXT NOT NULL DEFAULT '',
   languages       TEXT NOT NULL DEFAULT 'cpp,c,python',
   score_mode      TEXT NOT NULL DEFAULT 'sum',  -- sum | allornothing
+  -- M5: tolerance for numeric output. 0 keeps the exact match, which is the
+  -- right default for every problem that is not about floating point.
+  float_eps       REAL NOT NULL DEFAULT 0,
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
 );

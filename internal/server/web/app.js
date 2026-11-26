@@ -162,6 +162,7 @@ function render() {
   const views = {
     exams: viewExams, problems: viewProblems, templates: viewTemplates,
     monitor: viewMonitor, submissions: viewSubmissions, scores: viewScores,
+    similarity: viewSimilarity,
     reconcile: viewReconcile, system: viewSystem,
   };
   (views[S.view] || viewExams)();
@@ -622,6 +623,11 @@ async function openProblemEditor(id) {
     mode: el('select', {},
       el('option', { value: 'sum', selected: p.score_mode !== 'allornothing' }, '按测试点累加'),
       el('option', { value: 'allornothing', selected: p.score_mode === 'allornothing' }, '全部通过才得分')),
+    eps: el('select', {},
+      el('option', { value: '0', selected: !p.float_eps }, '精确比对（默认）'),
+      el('option', { value: '0.000001', selected: p.float_eps === 1e-6 }, '浮点容差 1e-6'),
+      el('option', { value: '0.0001', selected: p.float_eps === 1e-4 }, '浮点容差 1e-4'),
+      el('option', { value: '0.01', selected: p.float_eps === 0.01 }, '浮点容差 0.01')),
   };
   f.desc.value = p.description_md || '';
   f.inDesc.value = p.input_desc || '';
@@ -660,7 +666,12 @@ async function openProblemEditor(id) {
       el('label', {}, '内存限制(MB)', f.ml),
       el('label', {}, '难度 1-5', f.diff),
       el('label', {}, '知识点标签(逗号分隔)', f.tags),
-      el('label', {}, '评分方式', f.mode)),
+      el('label', {}, '评分方式', f.mode),
+      el('label', {}, '输出比对', f.eps)),
+    el('p', { class: 'muted small' },
+      '答案是小数的题目要选浮点容差，否则学生多输出或少输出一位小数就全判错。' +
+      '容差同时按绝对与相对误差判断，所以数值很大或接近 0 时都不会误杀；' +
+      '非数字部分仍然严格比对。'),
     el('div', {}, el('div', { class: 'muted' }, '允许的语言'), el('div', { class: 'row' }, langs)),
     el('div', {},
       el('div', { class: 'row' }, el('h3', {}, '样例'), el('button', { onclick: () => addSample() }, '添加样例')),
@@ -681,6 +692,7 @@ async function openProblemEditor(id) {
           samples: [...samples.children].map((s) => s._get()),
           time_limit_ms: Number(f.tl.value), memory_limit_mb: Number(f.ml.value),
           difficulty: Number(f.diff.value),
+          float_eps: Number(f.eps.value),
           tags: f.tags.value.split(',').map((t) => t.trim()).filter(Boolean),
           languages: chosen, score_mode: f.mode.value,
         };
@@ -992,6 +1004,179 @@ function openStream(cursor, renderSessions, addEvents, feedState) {
     feedState.textContent = '连接中断，正在重连…';
     feedState.className = 'warn';
   });
+}
+
+// -------------------------------------------------------------- 查重 view
+
+// The cutoff is remembered across refreshes because a teacher settles on one
+// and then re-runs the report after every re-judge.
+let simCutoff = 50;
+
+async function viewSimilarity() {
+  if (!S.examId) return setMain(el('div', { class: 'empty' }, '请先在「考试/练习」中选择一场。'));
+
+  const cutoff = el('input', { type: 'number', class: 'narrow', value: simCutoff, min: '0', max: '100' });
+  const box = el('div', { class: 'panel' });
+  const head = el('div', { class: 'panel' },
+    el('div', { class: 'row' },
+      el('h2', {}, '代码查重'),
+      el('label', { class: 'row' }, '相似度不低于', cutoff, '%'),
+      el('button', {
+        class: 'primary',
+        onclick: () => { simCutoff = Number(cutoff.value) || 0; load(); },
+      }, '重新分析')),
+    el('p', { class: 'muted small' },
+      '按题目两两比对终稿。先把代码归一化成 token 流再取指纹，所以改变量名、' +
+      '改注释、重新排版都不影响结果；但它分不出「抄袭」和「想到一块去了」——' +
+      '只有一种正确写法的题目全班都会很像。请把它当作「先看这几对」的排序，' +
+      '而不是结论。'));
+  setMain(head, box);
+
+  const load = async () => {
+    setKids(box, el('div', { class: 'empty' }, '分析中…'));
+    try {
+      const rep = await api(`/exams/${S.examId}/similarity?min=${simCutoff}`);
+      renderSimilarity(box, rep);
+    } catch (e) { setKids(box, el('div', { class: 'err' }, e.message)); }
+  };
+  load();
+}
+
+function renderSimilarity(box, rep) {
+  if (!rep.problems.length) {
+    return setKids(box, el('div', { class: 'empty' }, '这场考试还没有终稿提交。'));
+  }
+  setKids(box, ...rep.problems.map((p) => el('div', {},
+    el('div', { class: 'row' },
+      el('h3', {}, `第 ${p.problem_id} 题 ${p.title || ''}`),
+      el('span', { class: 'muted' }, `参与比对 ${p.compared} 份`),
+      p.skipped.length
+        ? el('span', {
+            class: 'muted',
+            title: `代码过短（少于 ${rep.min_tokens} 个 token）的提交不参与比对：` +
+                   `${p.skipped.join('、')}。这类题目没有发挥空间，比对只会得到满屏误报。`,
+          }, `已跳过 ${p.skipped.length} 份过短提交`)
+        : null),
+    p.pairs.length
+      ? el('div', { class: 'scroll' }, el('table', {},
+          el('thead', {}, el('tr', {},
+            ...['相似度', '共享片段', '学生 A', '学生 B', ''].map((h) => el('th', {}, h)))),
+          el('tbody', {}, p.pairs.map((pair) => el('tr', {},
+            el('td', {}, el('span', {
+              class: pair.score >= 90 ? 'err' : pair.score >= 70 ? 'warn' : 'muted',
+            }, `${pair.score}%`)),
+            el('td', { class: 'num' }, pair.shared),
+            el('td', {}, `${pair.a.student_no} ${pair.a.name || ''}`),
+            el('td', {}, `${pair.b.student_no} ${pair.b.name || ''}`),
+            el('td', {}, el('button', {
+              onclick: () => openSideBySide(pair),
+            }, '并排查看')),
+          )))))
+      : el('div', { class: 'empty' },
+          `没有相似度 ≥ ${rep.cutoff}% 的提交。`))));
+}
+
+async function openSideBySide(pair) {
+  showModal('并排对比', [el('div', { class: 'empty' }, '加载中…')]);
+  try {
+    const [a, b] = await Promise.all([
+      api(`/submissions/${pair.a.submission_id}`),
+      api(`/submissions/${pair.b.submission_id}`),
+    ]);
+    showModal(`并排对比 · 相似度 ${pair.score}%（共享 ${pair.shared} 个片段）`, [
+      el('div', { class: 'grid2' },
+        el('div', {},
+          el('div', { class: 'row' },
+            el('strong', {}, `${pair.a.student_no} ${pair.a.name || ''}`),
+            el('button', { onclick: () => openReplay(pair.a.submission_id) }, '看编写过程')),
+          el('pre', { class: 'code tall' }, a.code || '')),
+        el('div', {},
+          el('div', { class: 'row' },
+            el('strong', {}, `${pair.b.student_no} ${pair.b.name || ''}`),
+            el('button', { onclick: () => openReplay(pair.b.submission_id) }, '看编写过程')),
+          el('pre', { class: 'code tall' }, b.code || ''))),
+    ], [el('button', { onclick: closeModal }, '关闭')]);
+  } catch (e) { toast(e.message, true); }
+}
+
+// ------------------------------------------------------------ 编写过程回放
+
+// What this answers is not "did they paste" - everyone pastes, that is the
+// designed workflow - but "did this answer arrive in one piece".
+async function openReplay(submissionID) {
+  showModal('编写过程', [el('div', { class: 'empty' }, '加载中…')]);
+  try {
+    const r = await api(`/submissions/${submissionID}/replay`);
+    renderReplay(r);
+  } catch (e) { toast(e.message, true); closeModal(); }
+}
+
+function renderReplay(r) {
+  const s = r.summary;
+  if (!r.steps.length) {
+    return showModal('编写过程', [el('div', { class: 'empty' }, '没有留存的编辑过程。')],
+      [el('button', { onclick: closeModal }, '关闭')]);
+  }
+
+  const code = el('pre', { class: 'code tall' }, r.steps[r.steps.length - 1].code || '');
+  const caption = el('div', { class: 'muted small' });
+  const slider = el('input', {
+    type: 'range', min: '0', max: String(r.steps.length - 1),
+    value: String(r.steps.length - 1), class: 'wide',
+  });
+  const show = (i) => {
+    const st = r.steps[i];
+    code.textContent = st.code || '';
+    caption.textContent =
+      `第 ${i + 1} / ${r.steps.length} 版 · ${fmtTime(st.at)} · ` +
+      `${st.bytes} 字节（${st.added >= 0 ? '+' : ''}${st.added}）· ` +
+      (st.kind === 'final' ? '学生提交的终稿' : '定时快照');
+  };
+  slider.addEventListener('input', () => show(Number(slider.value)));
+  show(r.steps.length - 1);
+
+  const suspicious = s.largest_jump_pct >= 60 && r.steps.length > 1;
+
+  showModal(`编写过程 · ${r.student_no} ${r.name || ''} · ${r.problem_title || ''}`, [
+    el('div', { class: 'row' },
+      el('span', {}, `共 ${s.steps} 个版本`),
+      el('span', { class: 'muted' }, `跨时 ${fmtDur(s.span_ms)}`),
+      el('span', { class: 'muted' }, `终稿 ${s.final_bytes} 字节`),
+      el('span', { class: s.paste_count ? 'warn' : 'muted' },
+        `粘贴 ${s.paste_count} 次 / ${s.paste_chars} 字符`)),
+    el('p', { class: suspicious ? 'warn' : 'muted' },
+      suspicious
+        ? `最大的一次增量就占了终稿的 ${s.largest_jump_pct}%（${s.largest_jump} 字节，` +
+          `发生在 ${fmtTime(s.largest_jump_at)}）—— 这一版几乎是整个答案一次出现的。`
+        : `最大的一次增量占终稿的 ${s.largest_jump_pct}%，代码是逐步长出来的。`),
+    growthChart(r.steps, r.events),
+    slider,
+    caption,
+    code,
+  ], [el('button', { onclick: closeModal }, '关闭')]);
+}
+
+// A column per stored version, height proportional to size, with paste events
+// marked underneath. One tall step next to a row of short ones is the shape
+// worth looking at.
+function growthChart(steps, events) {
+  const max = Math.max(1, ...steps.map((s) => s.bytes));
+  const bars = steps.map((st, i) => {
+    const pct = Math.round((st.bytes / max) * 100);
+    const jump = st.added > 0 ? Math.round((st.added / max) * 100) : 0;
+    return el('div', {
+      class: 'gbar',
+      title: `${fmtTime(st.at)} · ${st.bytes} 字节（${st.added >= 0 ? '+' : ''}${st.added}）`,
+    },
+      el('div', { class: 'gbar-fill', style: `height:${pct}%` },
+        jump > 0 ? el('div', { class: 'gbar-add', style: `height:${Math.round(jump / Math.max(pct, 1) * 100)}%` }) : null),
+      el('div', { class: 'gbar-x' }, String(i + 1)));
+  });
+  const marks = events.length
+    ? el('div', { class: 'muted small' },
+        '粘贴：' + events.map((e) => `${fmtTime(e.at)}(${e.chars}字)`).join('、'))
+    : null;
+  return el('div', {}, el('div', { class: 'growth' }, bars), marks);
 }
 
 // ---------------------------------------------------------- submission view

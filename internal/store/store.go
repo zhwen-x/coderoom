@@ -117,6 +117,9 @@ var addedColumns = []addedColumn{
 
 	// M4: the client's own account of what it is enforcing on its machine.
 	{"sessions", "guard_json", "TEXT NOT NULL DEFAULT '{}'"},
+
+	// M5: per-problem tolerance for numeric output.
+	{"problems", "float_eps", "REAL NOT NULL DEFAULT 0"},
 }
 
 func (s *Store) addColumns() error {

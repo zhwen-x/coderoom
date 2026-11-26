@@ -127,6 +127,7 @@ func (s *Server) runTask(ctx context.Context, worker string, task *store.JudgeTa
 			TimeLimitMS:   problem.TimeLimitMS,
 			MemoryLimitMB: problem.MemoryLimitMB,
 			ScoreMode:     problem.ScoreMode,
+			FloatEpsilon:  problem.FloatEps,
 		},
 		Cases: jcases,
 	})

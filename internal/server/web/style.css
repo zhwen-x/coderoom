@@ -89,6 +89,10 @@ label > input, label > select, label > textarea { color: var(--text); }
 /* A checkbox or radio must not inherit the full-width rule above: inside a
    flex row it would eat the whole line and push its own label onto the next. */
 input[type=checkbox], input[type=radio] { width: auto; margin: 0; }
+/* A number sitting inline inside a sentence must not stretch to the full row
+   and break the words around it onto separate lines - the same trap the
+   checkboxes fell into. */
+input.narrow { width: 5rem; }
 .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
 .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: .6rem; }
 .panel {
@@ -118,6 +122,22 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .dot { display: inline-block; width: .55rem; height: .55rem; border-radius: 50%; }
 .dot.on { background: var(--ok); }
 .dot.off { background: var(--bad); }
+
+/* code-growth chart in the replay view: one column per stored version, so a
+   single tall step beside a row of short ones is visible at a glance. */
+.growth {
+  display: flex; align-items: flex-end; gap: 2px;
+  height: 120px; padding: .4rem 0; overflow-x: auto;
+}
+.gbar { display: flex; flex-direction: column; justify-content: flex-end;
+        height: 100%; min-width: 10px; flex: 1 1 10px; }
+.gbar-fill { background: var(--accent); border-radius: 2px 2px 0 0;
+             display: flex; align-items: flex-start; min-height: 1px; }
+/* The newly added slice of each column, so growth reads as growth. */
+.gbar-add { width: 100%; background: var(--warn); border-radius: 2px 2px 0 0; }
+.gbar-x { font-size: 10px; color: var(--muted); text-align: center; }
+pre.code.tall { max-height: 46vh; overflow: auto; }
+input.wide { width: 100%; }
 
 /* invigilation dashboard */
 .scroll.tall { max-height: 60vh; overflow-y: auto; }

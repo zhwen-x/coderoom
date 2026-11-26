@@ -16,6 +16,8 @@ type Problem struct {
 	TimeLimitMS   int
 	MemoryLimitMB int
 	ScoreMode     string // "sum" | "allornothing"
+	// FloatEpsilon is the tolerance for numeric output; zero means exact.
+	FloatEpsilon float64
 }
 
 // TestCase points at one input/output file pair.
@@ -242,7 +244,9 @@ func (j *Judger) Judge(ctx context.Context, req Request) (*Result, error) {
 				break
 			}
 			actual, _ := os.ReadFile(outPath)
-			if cmp := CompareOutput(expected, actual); cmp.OK {
+			if cmp := CompareOutput(expected, actual, CompareOptions{
+				FloatEpsilon: req.Problem.FloatEpsilon,
+			}); cmp.OK {
 				cr.Verdict = protocol.VerdictAC
 				cr.Score = tc.Score
 			} else {

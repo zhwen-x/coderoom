@@ -34,8 +34,12 @@ type Problem struct {
 	Tags          []string          `json:"tags"`
 	Languages     []string          `json:"languages"`
 	ScoreMode     string            `json:"score_mode"`
-	CreatedAt     int64             `json:"created_at"`
-	UpdatedAt     int64             `json:"updated_at"`
+	// FloatEps is the tolerance for numeric output; 0 means an exact match.
+	// Set it on problems whose answer is a real number, where demanding the
+	// same digits would fail every correct submission.
+	FloatEps  float64 `json:"float_eps"`
+	CreatedAt int64   `json:"created_at"`
+	UpdatedAt int64   `json:"updated_at"`
 
 	// Derived, filled by List/Get for the teacher UI.
 	CaseCount int `json:"case_count"`
@@ -99,6 +103,10 @@ func (p *Problem) normalize() {
 	if len(p.Languages) == 0 {
 		p.Languages = []string{protocol.LangCPP, protocol.LangC, protocol.LangPython}
 	}
+	// A negative or absurd tolerance would silently accept anything.
+	if p.FloatEps < 0 || p.FloatEps > 1 {
+		p.FloatEps = 0
+	}
 	if p.ScoreMode != ScoreModeAllOrNothing {
 		p.ScoreMode = ScoreModeSum
 	}
@@ -117,12 +125,12 @@ func (s *Store) CreateProblem(ctx context.Context, p *Problem) (int64, error) {
 	res, err := s.exec(ctx, `
 		INSERT INTO problems(title, description_md, input_desc, output_desc, samples_json,
 		  time_limit_ms, memory_limit_mb, difficulty, tags, languages, score_mode,
-		  created_at, updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		  float_eps, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.Title, p.DescriptionMD, p.InputDesc, p.OutputDesc, string(samples),
 		p.TimeLimitMS, p.MemoryLimitMB, p.Difficulty,
 		strings.Join(p.Tags, ","), strings.Join(p.Languages, ","), p.ScoreMode,
-		now, now)
+		p.FloatEps, now, now)
 	if err != nil {
 		return 0, err
 	}
@@ -143,12 +151,12 @@ func (s *Store) UpdateProblem(ctx context.Context, p *Problem) error {
 	res, err := s.exec(ctx, `
 		UPDATE problems SET title=?, description_md=?, input_desc=?, output_desc=?,
 		  samples_json=?, time_limit_ms=?, memory_limit_mb=?, difficulty=?, tags=?,
-		  languages=?, score_mode=?, updated_at=?
+		  languages=?, score_mode=?, float_eps=?, updated_at=?
 		WHERE id=?`,
 		p.Title, p.DescriptionMD, p.InputDesc, p.OutputDesc, string(samples),
 		p.TimeLimitMS, p.MemoryLimitMB, p.Difficulty,
 		strings.Join(p.Tags, ","), strings.Join(p.Languages, ","), p.ScoreMode,
-		NowMS(), p.ID)
+		p.FloatEps, NowMS(), p.ID)
 	if err != nil {
 		return err
 	}
@@ -160,7 +168,7 @@ func (s *Store) UpdateProblem(ctx context.Context, p *Problem) error {
 
 const problemCols = `p.id, p.title, p.description_md, p.input_desc, p.output_desc,
 	p.samples_json, p.time_limit_ms, p.memory_limit_mb, p.difficulty, p.tags,
-	p.languages, p.score_mode, p.created_at, p.updated_at,
+	p.languages, p.score_mode, p.float_eps, p.created_at, p.updated_at,
 	(SELECT COUNT(*) FROM testcases t WHERE t.problem_id=p.id),
 	(SELECT COALESCE(SUM(t.score),0) FROM testcases t WHERE t.problem_id=p.id)`
 
@@ -169,7 +177,8 @@ func scanProblem(sc interface{ Scan(...any) error }) (*Problem, error) {
 	var samples, tags, langs string
 	err := sc.Scan(&p.ID, &p.Title, &p.DescriptionMD, &p.InputDesc, &p.OutputDesc,
 		&samples, &p.TimeLimitMS, &p.MemoryLimitMB, &p.Difficulty, &tags,
-		&langs, &p.ScoreMode, &p.CreatedAt, &p.UpdatedAt, &p.CaseCount, &p.CaseScore)
+		&langs, &p.ScoreMode, &p.FloatEps, &p.CreatedAt, &p.UpdatedAt,
+		&p.CaseCount, &p.CaseScore)
 	if err != nil {
 		return nil, err
 	}
